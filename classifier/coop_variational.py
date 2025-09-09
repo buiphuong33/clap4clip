@@ -278,6 +278,7 @@ class CLIP(nn.Module):
         contrastive_matrix = image_feats @ text_feats.t() # 16 x 16 matrix
         return contrastive_matrix
     
+    
     def get_attention_mask(self, attn_shape, nb_task_tokens, original_query_num):
         """Mask so that task tokens don't interact together.
 
