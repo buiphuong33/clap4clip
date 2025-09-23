@@ -439,8 +439,8 @@ class CLIP(nn.Module):
                 if self.args.hierarchical:
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                 qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0) 
-                mu    = qdist.loc
-                sigma = qdist.scale
+                mu    = qdist.loc.to(image_features_normed.dtype)
+                sigma = qdist.scale.to(image_features_normed.dtype)
                 if self.use_msc:
                     # cập nhật centroid_cur từ batch
                     self._msc_update_centroid_cur(
@@ -462,11 +462,12 @@ class CLIP(nn.Module):
                 
                 #text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                 if getattr(self.args, "use_sampling", True):
-                    eps = torch.randn(self.forward_times, *mu.shape, device=mu.device)
+                    eps = torch.randn(self.forward_times, *mu.shape, device=mu.device,dtype=mu.dtype)
                     rsamples = mu.unsqueeze(0) + eps * sigma
                 else:
                     rsamples = mu.unsqueeze(0)
-
+                    
+                text_features_ = text_features_.to(image_features_normed.dtype)
                 text_features_ = text_features_.unsqueeze(0).expand(
                     self.forward_times, -1, -1, -1
                 ) if self.args.hierarchical else text_features_.unsqueeze(0).expand(
