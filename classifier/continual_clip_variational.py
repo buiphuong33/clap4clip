@@ -295,15 +295,15 @@ class CLIP(nn.Module):
         with torch.no_grad():
             image_features = self.image_encoder(image.type(self.dtype))
             image_features_normed = image_features / image_features.norm(dim=-1, keepdim=True)
-            image_features = image_features_normed.detach()
-            image_features_normed = image_features_normed.detach()
+            image_features_normed = image_features_normed.to(torch.float32).detach()
+            image_features = image_features_normed
 
         n_class = self.n_class
         prev_cls_num = self.n_class - self.task_to_cls_num[self.args.sess]
         logit_scale = self.logit_scale.exp()
         if test:
             with torch.no_grad():
-                text_features = self.frozen_text_features
+                text_features = self.frozen_text_features.to(torch.float32)
                 context = image_features_normed.clone() # torch.cat([image_features.unsqueeze(0), self.task_token_two[-1]], 1)
                 n_query = text_features.shape[0]
                 query = text_features.clone().unsqueeze(0)
@@ -318,8 +318,9 @@ class CLIP(nn.Module):
                     # vga_features_global = self.vga(query, context.unsqueeze(0)).squeeze(0)
                     global_input_features = vga_features[:n_query]  if self.args.use_vga else text_features
                     global_input_features = global_input_features + text_features
+                    global_input_features = global_input_features.to(torch.float32)
                     qdist_g = self.get_variational_adapter_features(global_input_features, global_adapter=True)
-                    rsamples_g = qdist_g.rsample([self.forward_times_global])
+                    rsamples_g = qdist_g.rsample([self.forward_times_global]).to(torch.float32)
 
                 logits =[]
                 samplewise_text_feats = []
@@ -327,23 +328,23 @@ class CLIP(nn.Module):
                 for i in range(self.args.sess+1):
                     start_cls_idx = end_cls_idx
                     end_cls_idx += self.task_to_cls_num[i]
-                    text_features_relevant = text_features[start_cls_idx:end_cls_idx].clone()
+                    text_features_relevant = text_features[start_cls_idx:end_cls_idx].clone().to(torch.float32)
                     text_features_ = text_features_relevant
                     if self.args.use_vga:
-                        text_features_ = text_features_ + vga_features[start_cls_idx:end_cls_idx] 
+                        text_features_ = text_features_ + vga_features[start_cls_idx:end_cls_idx].to(torch.float32)
                     if self.args.expandable_tokens:
-                        text_features_ = text_features_ + vga_features[n_query+i]
+                        text_features_ = text_features_ + vga_features[n_query+i].to(torch.float32)
 
                     if self.args.hierarchical:
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
-                    rsamples = qdist.rsample([self.forward_times])
+                    rsamples = qdist.rsample([self.forward_times]).to(torch.float32)
                    
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                     if self.args.hierarchical:
                         rsamples = rsamples.flatten(0, 1)
                         text_features_ = text_features_.flatten(0, 1)
-                    text_features_ = rsamples + text_features_ 
+                    text_features_ = rsamples + text_features_.to(torch.float32)
                     
                     logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1) 
                   
@@ -366,7 +367,7 @@ class CLIP(nn.Module):
 
         else:
             
-            text_features = self.frozen_text_features
+            text_features = self.frozen_text_features.to(torch.float32)
             logits =[]
             kl_losses = []
             prior_matching_losses = []
@@ -378,13 +379,14 @@ class CLIP(nn.Module):
                 query = torch.cat([query] + [token for token in self.task_tokens], 1)
             attn_mask = self.get_attention_mask((query.shape[1], query.shape[1]), self.args.sess+1, text_features.shape[0])
             if self.args.use_vga:
-                vga_features_all = self.vga(query, context.unsqueeze(0), tgt_mask=attn_mask).squeeze(0)
+                vga_features_all = self.vga(query, context.unsqueeze(0), tgt_mask=attn_mask).squeeze(0).to(torch.float32)
             
             rsamples_g = None 
             if self.args.hierarchical:
                 # vga_features_global = self.vga(query, context.unsqueeze(0)).squeeze(0)
                 global_input_features = vga_features_all[:n_query] if self.args.use_vga else text_features
                 global_input_features = global_input_features + text_features
+                global_input_features = global_input_features.to(torch.float32)
                 pdist_g = self.get_prior_dist(context, global_input_features, labels, self.args.sess+1, 
                                                 None, 
                                                 None,
@@ -394,7 +396,7 @@ class CLIP(nn.Module):
                 qdist_g = self.get_variational_adapter_features(global_input_features, global_adapter=True)
                 # pdist_g = self.get_prior_dist(text_features=global_input_features, use_np_prior=False)
                 prior_matching_losses.append(kl_divergence(qdist_g, pdist_g).mean(0).sum() * 0.001)
-                rsamples_g = qdist_g.rsample([self.forward_times_global])
+                rsamples_g = qdist_g.rsample([self.forward_times_global]).to(torch.float32)
                 if self.args.lasp  and self.args.beta > 0:
                     prior_text_features = self.frozen_text_features_individual.clone()
                     sims = torch.stack([prior_text_features @ rsamples_g[r].t() for r in range(rsamples_g.shape[0])], 0)
@@ -427,20 +429,20 @@ class CLIP(nn.Module):
                     # update class to task mapping for faster indexing of task id based on class label id
                     self.class_to_task_mapping.update(dict(zip(np.arange(start_cls_idx, end_cls_idx), [i] * (end_cls_idx - start_cls_idx))))
 
-                text_features_relevant = text_features.clone()[start_cls_idx:end_cls_idx]
+                text_features_relevant = text_features.clone()[start_cls_idx:end_cls_idx].to(torch.float32)
                 if self.args.use_vga:
                     vga_features = vga_features_all[start_cls_idx:end_cls_idx]
                     if self.args.expandable_tokens:
                         vga_features = vga_features + vga_features_all[n_query+i]
-                    text_features_ = text_features_relevant + vga_features
+                    text_features_ = text_features_relevant + vga_features.to(torch.float32)
                 else:
                     text_features_ = text_features_relevant
 
                 if self.args.hierarchical:
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                 qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0) 
-                mu    = qdist.loc.to(image_features_normed.dtype)
-                sigma = qdist.scale.to(image_features_normed.dtype)
+                mu    = qdist.loc.to(torch.float32)
+                sigma = qdist.scale.to(torch.float32)
                 if self.use_msc:
                     # cập nhật centroid_cur từ batch
                     self._msc_update_centroid_cur(
@@ -462,11 +464,11 @@ class CLIP(nn.Module):
                 
                 #text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                 if getattr(self.args, "use_sampling", True):
-                    eps = torch.randn(self.forward_times, *mu.shape, device=mu.device,dtype=mu.dtype)
+                    eps = torch.randn(self.forward_times, *mu.shape, device=mu.device,dtype=torch.float32)
                     rsamples = mu.unsqueeze(0) + eps * sigma
                 else:
                     rsamples = mu.unsqueeze(0)
-                    
+
                 text_features_ = text_features_.to(image_features_normed.dtype)
                 text_features_ = text_features_.unsqueeze(0).expand(
                     self.forward_times, -1, -1, -1
@@ -477,7 +479,7 @@ class CLIP(nn.Module):
                 if self.args.hierarchical:
                     rsamples = rsamples.flatten(0, 1)
                     text_features_ = text_features_.flatten(0, 1)
-                text_features_ = rsamples + text_features_ 
+                text_features_ = rsamples + text_features_.to(torch.float32)
                 
                 taskwise_means.append(rsamples.mean(0))
                 if self.args.lasp  and self.args.beta > 0 and (finetuning or (not finetuning and  self.args.sess == i)):
