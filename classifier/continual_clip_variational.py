@@ -96,6 +96,17 @@ class CLIP(nn.Module):
         self.class_to_task_mapping = {} # for faster indexing to get task ids
         self.classwise_centroids = {}
         self.task_to_distribution = task_to_distribution
+
+        self.msc_alpha = getattr(self.args, "msc_alpha", 0.3)      # hệ số bù mean
+        self.msc_beta = getattr(self.args, "msc_beta", 0.9)        # EMA cho centroid_cur
+        self.use_msc = getattr(self.args, "use_msc", True)         # bật/tắt MSC
+        self.use_cov_reg = getattr(self.args, "use_cov_reg", False)# bật/tắt reg cho sigma
+        self.lambda_cov = getattr(self.args, "lambda_cov", 1e-3)   # trọng số reg sigma
+
+        # Lưu centroid theo id lớp toàn cục (0..n_class-1)
+        self.centroid_prev = {}   # {class_id: torch.Tensor[D]}
+        self.centroid_cur  = {}   # {class_id: torch.Tensor[D}}
+
         self.init_new_heads()
 
     
@@ -117,6 +128,50 @@ class CLIP(nn.Module):
         with torch.no_grad():
             init_with_task_embed(self.mu_adapters[-1])
             init_with_task_embed(self.sigma_adapters[-1], var=True)
+    
+
+    @torch.no_grad()
+    def _msc_update_centroid_cur(self, text_feats_block, labels_block, start_cls, end_cls):
+        """
+        text_feats_block:  [B_i, D] hoặc [R, B_i, D] (đã +VGA/+task_token, trước adapter)
+        labels_block:      [B] nhãn global (0..n_class-1) tương ứng với samples trong block i
+        """
+        # nếu hierarchical lấy mean theo sample chiều đầu
+        if text_feats_block.dim() == 3:   # [R, B_i, D]
+            text_feats_block = text_feats_block.mean(0)  # [B_i, D]
+
+        # gom theo class trong đoạn [start_cls, end_cls)
+        for cls in range(start_cls, end_cls):
+            mask = (labels_block == cls)
+            if mask.any():
+                cur = text_feats_block[mask]
+                cur_mean = cur.mean(0)
+                if cls not in self.centroid_cur:
+                    self.centroid_cur[cls] = cur_mean.detach()
+                else:
+                    self.centroid_cur[cls] = (
+                        self.msc_beta * self.centroid_cur[cls]
+                        + (1.0 - self.msc_beta) * cur_mean.detach()
+                    )
+
+    def _msc_get_delta_block(self, start_cls, end_cls, device, dim):
+        """
+        trả về Δm cho block lớp [start_cls, end_cls) dạng [n_block, D]
+        nếu thiếu centroid_prev hoặc centroid_cur thì trả 0
+        """
+        deltas = []
+        for cls in range(start_cls, end_cls):
+            prev = self.centroid_prev.get(cls, None)
+            cur  = self.centroid_cur.get(cls, None)
+            if (prev is None) or (cur is None):
+                deltas.append(torch.zeros(dim, device=device))
+            else:
+                deltas.append(prev.to(device) - cur.to(device))
+        return torch.stack(deltas, 0)  # [n_block, D]
+
+    def finalize_task(self):
+        # lưu lại centroid_cur làm mốc cho task sau
+        self.centroid_prev = {k: v.clone().detach() for k, v in self.centroid_cur.items()}
 
     def unpack_prev_components(self, previous_components):
         previous_mu, previous_sigma, previous_task_tokens, previous_vga, previous_mu_global_adapter, previous_sigma_global_adapter  = previous_components
@@ -383,10 +438,41 @@ class CLIP(nn.Module):
 
                 if self.args.hierarchical:
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
-                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
-                rsamples = qdist.rsample([self.forward_times])
+                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0) 
+                mu    = qdist.loc
+                sigma = qdist.scale
+                if self.use_msc:
+                    # cập nhật centroid_cur từ batch
+                    self._msc_update_centroid_cur(
+                        text_features_,   # đầu vào adapter (đã + VGA, + token)
+                        labels,           # nhãn global của batch (0..n_class-1)
+                        start_cls_idx,
+                        end_cls_idx
+                    )
+                    # tính delta cho block lớp hiện tại
+                    delta_block = self._msc_get_delta_block(
+                        start_cls_idx, end_cls_idx,
+                        device=text_features_.device,
+                        dim=mu.shape[-1]
+                    )
+                    # bù mean
+                    mu = mu + self.msc_alpha * delta_block
+           
+                #rsamples = qdist.rsample([self.forward_times])
                 
-                text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
+                #text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
+                if getattr(self.args, "use_sampling", True):
+                    eps = torch.randn(self.forward_times, *mu.shape, device=mu.device)
+                    rsamples = mu.unsqueeze(0) + eps * sigma
+                else:
+                    rsamples = mu.unsqueeze(0)
+
+                text_features_ = text_features_.unsqueeze(0).expand(
+                    self.forward_times, -1, -1, -1
+                ) if self.args.hierarchical else text_features_.unsqueeze(0).expand(
+                    self.forward_times, -1, -1
+                )
+
                 if self.args.hierarchical:
                     rsamples = rsamples.flatten(0, 1)
                     text_features_ = text_features_.flatten(0, 1)
@@ -634,7 +720,9 @@ class ClClipVariational(Evaluator):
         self.model.set_classifier()
         if self.args.distill and finalize:
             self.preserve_copy_for_distillation()
-
+        if getattr(self.model, "use_msc", False):
+            self.model.finalize_task()
+            
     def finetuning(self, data):
         self.unfreeze_for_finetuning()
         self.cur_iter_idx = 0
