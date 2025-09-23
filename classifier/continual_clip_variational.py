@@ -283,17 +283,18 @@ class CLIP(nn.Module):
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)    
 
-                    # --- MSC offset (nếu có) ---
-                    if hasattr(self, 'args') and hasattr(self.args, 'use_msc') and self.args.use_msc:
-                        # Tính global class indices cho segment [start_cls_idx:end_cls_idx]
-                        # rồi cộng offset nếu tồn tại cho từng lớp
-                        if isinstance(text_features_, torch.Tensor):
+                    # --- MSC offset trên mean (μ) ---
+                    if hasattr(self, 'args') and getattr(self.args, 'use_msc', False):
+                        if hasattr(self, 'mean_shift_offsets') and len(self.mean_shift_offsets) > 0:
+                            mu = qdist.loc.clone()
                             for local_k in range(end_cls_idx - start_cls_idx):
-                                g_idx = start_cls_idx + local_k  # chỉ số lớp toàn cục
-                                if hasattr(self, 'mean_shift_offsets') and (g_idx in self.mean_shift_offsets):
-                                    text_features_[..., local_k, :] = text_features_[..., local_k, :] + self.mean_shift_offsets[g_idx].to(text_features_.device).type_as(text_features_)
+                                g_idx = start_cls_idx + local_k
+                                if g_idx in self.mean_shift_offsets:
+                                    offset = self.mean_shift_offsets[g_idx].to(mu.device).type_as(mu)
+                                    mu[..., local_k, :] = mu[..., local_k, :] + offset
+                            qdist = Normal(mu, qdist.scale)
 
-
+                    
                     rsamples = qdist.rsample([self.forward_times])
                    
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
@@ -396,18 +397,22 @@ class CLIP(nn.Module):
                 if self.args.hierarchical:
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                 
-                # --- MSC offset (nếu có) ---
-                if hasattr(self, 'args') and hasattr(self.args, 'use_msc') and self.args.use_msc:
-                    # Tính global class indices cho segment [start_cls_idx:end_cls_idx]
-                    # rồi cộng offset nếu tồn tại cho từng lớp
-                    if isinstance(text_features_, torch.Tensor):
+                
+            
+                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)    
+
+                # --- MSC offset trên mean (μ) ---
+                if hasattr(self, 'args') and getattr(self.args, 'use_msc', False):
+                    if hasattr(self, 'mean_shift_offsets') and len(self.mean_shift_offsets) > 0:
+                        mu = qdist.loc.clone()
                         for local_k in range(end_cls_idx - start_cls_idx):
-                            g_idx = start_cls_idx + local_k  # chỉ số lớp toàn cục
-                            if hasattr(self, 'mean_shift_offsets') and (g_idx in self.mean_shift_offsets):
-                                text_features_[..., local_k, :] = text_features_[..., local_k, :] + self.mean_shift_offsets[g_idx].to(text_features_.device).type_as(text_features_)
+                            g_idx = start_cls_idx + local_k
+                            if g_idx in self.mean_shift_offsets:
+                                offset = self.mean_shift_offsets[g_idx].to(mu.device).type_as(mu)
+                                mu[..., local_k, :] = mu[..., local_k, :] + offset
+                        qdist = Normal(mu, qdist.scale)
 
 
-                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                 rsamples = qdist.rsample([self.forward_times])
                 
                 text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
