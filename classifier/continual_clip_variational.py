@@ -444,7 +444,7 @@ class CLIP(nn.Module):
                 if self.use_msc:
                     # cập nhật centroid_cur từ batch
                     self._msc_update_centroid_cur(
-                        text_features_,   # đầu vào adapter (đã + VGA, + token)
+                        image_features_normed,   # đầu vào adapter (đã + VGA, + token)
                         labels,           # nhãn global của batch (0..n_class-1)
                         start_cls_idx,
                         end_cls_idx
@@ -452,7 +452,7 @@ class CLIP(nn.Module):
                     # tính delta cho block lớp hiện tại
                     delta_block = self._msc_get_delta_block(
                         start_cls_idx, end_cls_idx,
-                        device=text_features_.device,
+                        device=mu.device,
                         dim=mu.shape[-1]
                     )
                     # bù mean
@@ -722,7 +722,7 @@ class ClClipVariational(Evaluator):
             self.preserve_copy_for_distillation()
         if getattr(self.model, "use_msc", False):
             self.model.finalize_task()
-            
+
     def finetuning(self, data):
         self.unfreeze_for_finetuning()
         self.cur_iter_idx = 0
