@@ -481,7 +481,7 @@ class CLIP(nn.Module):
                 taskwise_means.append(rsamples.mean(0))
                 if self.args.lasp  and self.args.beta > 0 and (finetuning or (not finetuning and  self.args.sess == i)):
                     prior_text_features = self.frozen_text_features_individual.clone()[start_cls_idx:end_cls_idx]
-                    sims = torch.stack([prior_text_features @ rsamples[r].t() for r in range(rsamples.shape[0])], 0)
+                    sims = torch.stack([prior_text_features @ rsamples[r].to(prior_text_features.dtype).t() for r in range(rsamples.shape[0])], 0)
                     sims = sims.mean(2).mean(0)
                     kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * self.args.beta)
                 logits_ = (logit_scale * image_features_normed @ text_features_.permute(0, 2, 1)) 
