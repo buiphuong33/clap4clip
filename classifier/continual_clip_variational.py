@@ -281,20 +281,7 @@ class CLIP(nn.Module):
 
                     if self.args.hierarchical:
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
-                    qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)    
-
-                    # --- MSC offset trên mean (μ) ---
-                    if hasattr(self, 'args') and getattr(self.args, 'use_msc', False):
-                        if hasattr(self, 'mean_shift_offsets') and len(self.mean_shift_offsets) > 0:
-                            mu = qdist.loc.clone()
-                            for local_k in range(end_cls_idx - start_cls_idx):
-                                g_idx = start_cls_idx + local_k
-                                if g_idx in self.mean_shift_offsets:
-                                    offset = self.mean_shift_offsets[g_idx].to(mu.device).type_as(mu)
-                                    mu[..., local_k, :] = mu[..., local_k, :] + offset
-                            qdist = Normal(mu, qdist.scale)
-
-                    
+                    qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                     rsamples = qdist.rsample([self.forward_times])
                    
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
@@ -396,23 +383,7 @@ class CLIP(nn.Module):
 
                 if self.args.hierarchical:
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
-                
-                
-            
-                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)    
-
-                # --- MSC offset trên mean (μ) ---
-                if hasattr(self, 'args') and getattr(self.args, 'use_msc', False):
-                    if hasattr(self, 'mean_shift_offsets') and len(self.mean_shift_offsets) > 0:
-                        mu = qdist.loc.clone()
-                        for local_k in range(end_cls_idx - start_cls_idx):
-                            g_idx = start_cls_idx + local_k
-                            if g_idx in self.mean_shift_offsets:
-                                offset = self.mean_shift_offsets[g_idx].to(mu.device).type_as(mu)
-                                mu[..., local_k, :] = mu[..., local_k, :] + offset
-                        qdist = Normal(mu, qdist.scale)
-
-
+                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                 rsamples = qdist.rsample([self.forward_times])
                 
                 text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
@@ -541,16 +512,16 @@ class ClClipVariational(Evaluator):
         self.task_to_cls_num = {}
         self.task_to_distribution = {}
 
+        # Thêm cho mean shift và FC head
+        self.old_means = None  # Lưu mean cũ từ task trước
+        self.classifier_head = None  # Lớp FC head
+        self.args.use_fc_head = getattr(args, 'use_fc_head', False)  #
+
         # for distillation
         self.previous_mu_adapters, self.previous_mu_global_adapter = None, None
         self.previous_sigma_adapters, self.previous_sigma_global_adapter = None, None
         self.previous_task_tokens = None
         self.previous_vga = None
-
-        self.mean_shift_offsets = {}     # {class_idx: Tensor(ctx_dim,)}  // bù trực tiếp vào text features của lớp đó
-        self.prototype_means_prev = None # Tensor[n_old, ctx_dim]          // prototype trước khi học task mới
-        self._msc_max_batches = getattr(self.args, 'msc_max_batches', 5)   # số batch dùng ước lượng shift
-        self._msc_sigma = getattr(self.args, 'msc_sigma', 1.0)
 
     def init_task_tokens(self, ctx_dim):
         task_token = torch.zeros((1, 1,  ctx_dim), dtype=self.clip_model.dtype, requires_grad=True).cuda(device=self.args.default_gpu) 
@@ -598,7 +569,7 @@ class ClClipVariational(Evaluator):
 
         per_epoch_steps = len(train_loader)
 
-        self.init_model(class_names=self.current_class_names, per_epoch_steps=per_epoch_steps, prompt_templates=data['prompt_templates'])
+        self.init_model(class_names=self.current_class_names, per_epoch_steps=per_epoch_steps, prompt_templates=data['prompt_templates'], data=data)
 
         inter_adapter_distances = []
         run_times = []
@@ -645,18 +616,14 @@ class ClClipVariational(Evaluator):
         # pdb.set_trace()
             # print(self.model.image_encoder.layer1[0].conv1.weight[0])
         print(f"Average run time: {np.mean(run_times)}")
-
-        # === MSC: áp dụng mean shift compensation cho các lớp cũ ===
-        if getattr(self.args, 'use_msc', True) and self.args.sess > 0:
-            try:
-                self._apply_msc(train_loader)
-            except Exception as e:
-                print(f"[MSC] Skip due to error: {e}")
-
         self.model.eval()
         
         if self.model.vga is not None:
             self.model.vga.train()
+
+        # Retrain classifier_head nếu có
+        if self.args.use_fc_head and self.classifier_head is not None and 'memory_loader' in data:
+            self.retrain_classifier(data['memory_loader'])
         return self.model
 
     @torch.no_grad()
@@ -725,6 +692,9 @@ class ClClipVariational(Evaluator):
         if self.args.sess > 0 and self.args.expandable_tokens:
             self.epoch_log()
         
+        # Retrain classifier_head
+        if self.args.use_fc_head and self.classifier_head is not None:
+            self.retrain_classifier(memory_loader)
     @torch.no_grad()
     def preserve_copy_for_distillation(self):
         self.model.eval()
@@ -741,145 +711,6 @@ class ClClipVariational(Evaluator):
         freeze_parameters(self.previous_sigma_adapters, requires_grad=False)
         freeze_parameters(self.previous_task_tokens, requires_grad=False)
         freeze_parameters(self.previous_vga, requires_grad=False)
-        with torch.no_grad():
-            self.prototype_means_prev = None
-
-    @torch.no_grad()
-    def _get_text_features_per_class(
-        self,
-        image_feats_normed,              # [B, D]
-        start_cls_idx, end_cls_idx,      # range lớp
-        use_previous=False               # dùng components cũ hay hiện tại
-    ):
-        """
-        Trả về text_features_ (đÃ gồm VGA + task token nếu bật), dạng [B, C_task, D]
-        KHÔNG lấy mẫu (không rsample), đúng như forward nhưng deterministic.
-        """
-        # Chuẩn bị text features cố định
-        text_features = self.model.frozen_text_features.clone()  # [N_cls, D]
-        n_query = text_features.shape[0]
-        query = text_features.unsqueeze(0)                       # [1, N_cls, D]
-
-        # Task tokens & VGA
-        if self.args.expandable_tokens:
-            tokens = self.previous_task_tokens if use_previous else self.model.task_tokens
-            query = torch.cat([query] + [tok for tok in tokens], 1)
-
-        attn_mask = self.model.get_attention_mask((query.shape[1], query.shape[1]),
-                                                self.args.sess if use_previous else self.args.sess+1,
-                                                text_features.shape[0])
-
-        vga = self.previous_vga if use_previous else self.model.vga
-        if self.args.use_vga and vga is not None:
-            vga_features_all = vga(query, image_feats_normed.unsqueeze(0), tgt_mask=attn_mask).squeeze(0)
-        else:
-            vga_features_all = None
-
-        # Lấy dải lớp liên quan
-        tf = text_features[start_cls_idx:end_cls_idx]                   # [C_task, D]
-        if self.args.use_vga and vga_features_all is not None:
-            vga_local = vga_features_all[start_cls_idx:end_cls_idx]     # [C_task, D]
-            tf = tf + vga_local
-            if self.args.expandable_tokens:
-                # task-index cho components "cũ" khác "mới": 
-                # - khi use_previous=True, nb task = self.args.sess
-                # - khi hiện tại, nb task = self.args.sess+1
-                task_idx = (self.args.sess if use_previous else self.args.sess)  # token index cố định theo task hiện tại
-                tf = tf + vga_features_all[n_query + task_idx]
-
-        # Nới chiều để broadcast theo batch ảnh
-        tf = tf.unsqueeze(0).expand(image_feats_normed.shape[0], -1, -1)  # [B, C_task, D]
-        return tf
-
-
-    @staticmethod
-    def _displacement(Y1, Y2, proto_old, sigma):
-        """
-        MACIL-style displacement:
-        Y1: [B, C, D]   - text feats (old components)
-        Y2: [B, C, D]   - text feats (new components)
-        proto_old: [C, D] - prototype mean của từng class cũ (trước khi học task mới)
-        return: delta_mu: [C, D]
-        """
-        DY = (Y2 - Y1).cpu().numpy()                 # [B, C, D]
-        Y1_np = Y1.cpu().numpy()                     # [B, C, D]
-        proto_np = proto_old.cpu().numpy()           # [C, D]
-
-        # khoảng cách giữa mỗi Y1[b, c, :] và prototype_old[c]
-        # distance: [C, B]
-        dist = ((Y1_np.transpose(1,0,2) - proto_np[:, None, :])**2).sum(axis=2)  # [C, B]
-        W = np.exp(-dist / (2 * sigma**2)) + 1e-5
-        W_norm = W / (W.sum(axis=1, keepdims=True) + 1e-12)                      # [C, B]
-
-        # tính weighted average theo batch B
-        # DY transpose: [C, B, D]
-        DY_cb = DY.transpose(1,0,2)
-        delta = (W_norm[:,:,None] * DY_cb).sum(axis=1)                            # [C, D]
-        return torch.from_numpy(delta).to(Y1.device)
-
-    @torch.no_grad()
-    def _apply_msc(self, new_task_loader):
-        """
-        Thực thi MSC sau khi học xong task self.args.sess.
-        Ý tưởng:
-        - Lấy một số batch ảnh từ task mới làm "context" (đúng như paper).
-        - Với mỗi batch: tính text features OLD (dùng previous_* components) và NEW (components hiện tại)
-            cho TẤT CẢ CÁC LỚP CŨ.
-        - Từ đó tính displacement theo công thức MACIL và CỘNG BÙ vào self.mean_shift_offsets[class_idx].
-        - Khi infer, forward sẽ cộng offset này vào text_features_ trước khi tính logits.
-        """
-        device = f"cuda:{self.args.default_gpu}"
-
-        # Xác định dải lớp cũ
-        nb_old = sum([self.task_to_cls_num[t] for t in range(self.args.sess)])  # tổng lớp cũ
-        if nb_old == 0:
-            return
-
-        # Lấy một số batch ảnh từ task mới
-        batches = 0
-        acc_delta = None  # [C_old, D]
-        acc_cnt = 0
-
-        for x, y, idx in new_task_loader:
-            x = x.cuda(device=device)
-            batches += 1
-            if batches > self._msc_max_batches:
-                break
-
-            # Tính image features (giống forward)
-            img = self.model.image_encoder(x.type(self.model.dtype))
-            img_norm = (img / img.norm(dim=-1, keepdim=True)).detach()
-
-            # Lấy text feats deterministic cho lớp cũ: OLD vs NEW
-            Y1 = self._get_text_features_per_class(img_norm, 0, nb_old, use_previous=True)   # [B, C_old, D]
-            Y2 = self._get_text_features_per_class(img_norm, 0, nb_old, use_previous=False)  # [B, C_old, D]
-
-            # Prototype cũ: dùng trung bình theo ảnh của Y1 làm xấp xỉ (đúng “context” của MSC)
-            proto_old = Y1.mean(dim=0) if self.prototype_means_prev is None else self.prototype_means_prev
-
-            # Tính displacement theo MACIL
-            delta = self._displacement(Y1, Y2, proto_old, sigma=self._msc_sigma)  # [C_old, D]
-
-            # Cộng dồn
-            acc_delta = delta if acc_delta is None else (acc_delta + delta)
-            acc_cnt += 1
-
-        if acc_cnt == 0:
-            return
-
-        delta_mu = (acc_delta / acc_cnt)  # [C_old, D]
-
-        # Cập nhật offset cho từng class cũ
-        for c in range(nb_old):
-            if c not in self.mean_shift_offsets:
-                self.mean_shift_offsets[c] = delta_mu[c].clone()
-            else:
-                self.mean_shift_offsets[c] = self.mean_shift_offsets[c] + delta_mu[c].clone()
-
-        # Lưu prototype dùng trong vòng MSC sau (tuỳ chọn)
-        self.prototype_means_prev = None  # hoặc proto_old nếu bạn muốn giữ
-        print(f"[MSC] Applied mean shift for {nb_old} old classes.")
-
 
     def expand_task_token_list(self):
         new_task_token = deepcopy(self.task_tokens[-1])
@@ -912,7 +743,7 @@ class ClClipVariational(Evaluator):
             self.mu_adapters[:-1].train()
             self.sigma_adapters[:-1].train()
     
-    def init_model(self, class_names, per_epoch_steps, prompt_templates=None):
+    def init_model(self, class_names, per_epoch_steps, prompt_templates=None, data=None):
         if self.args.sess > 0:
             freeze_parameters(self.vga, requires_grad=True)
             if self.args.expandable_tokens:
@@ -946,6 +777,16 @@ class ClClipVariational(Evaluator):
                 self.model.text_encoder.module.transformer.use_gradient_checkpoint = True
 
 
+            # Khởi tạo classifier_head nếu use_fc_head
+        if self.args.use_fc_head and self.classifier_head is None:
+            self.classifier_head = nn.Linear(self.model.frozen_text_features.shape[1], self.n_class).cuda(device=self.args.default_gpu)
+            nn.init.xavier_uniform_(self.classifier_head.weight)
+            nn.init.constant_(self.classifier_head.bias, 0)
+
+        # Tính old_means từ memory_loader nếu có
+        if self.args.sess > 0 and data is not None and 'memory_loader' in data:
+            self.compute_old_means(data['memory_loader'])
+
         self.build_optimizer(per_epoch_steps, lr=self.lr, warmup=True)
        
 
@@ -978,6 +819,16 @@ class ClClipVariational(Evaluator):
     def inference(self,image, label, num_test, test_class):
         self.model.eval()
         logits, feats = self.model(image, label, test=True, return_mean=False)
+
+        # Áp dụng mean shift compensation
+        if self.old_means is not None and self.args.sess > 0:
+            shift = self.old_means - self.model.frozen_text_features.mean(dim=0, keepdim=True)
+            logits = logits + (feats[1].unsqueeze(1) @ shift.unsqueeze(0)).squeeze(1)
+
+        # Áp dụng FC head nếu bật
+        if self.args.use_fc_head and self.classifier_head is not None:
+            logits = self.classifier_head(feats[1])
+
         return logits.float(), feats
 
     
@@ -1007,3 +858,37 @@ class ClClipVariational(Evaluator):
         log['token_min_dist'] = round(min_dist, 5)
         log['token_max_dist'] = round(max_dist, 5)
         print(f"\n{log}")
+
+    @torch.no_grad()
+    def compute_old_means(self, memory_loader):
+        self.model.eval()
+        old_features = []
+        old_labels = []
+        for x, y, _ in memory_loader:
+            x = x.cuda(device=self.args.default_gpu)
+            y = y.cuda(device=self.args.default_gpu)
+            _, feats = self.model(x, y, test=False, return_mean=True)
+            old_features.append(feats[0])  # feats[0] là image_features
+            old_labels.append(y)
+        old_features = torch.cat(old_features, dim=0)
+        old_labels = torch.cat(old_labels, dim=0)
+        self.old_means = torch.zeros(self.n_class, old_features.shape[1]).cuda(device=self.args.default_gpu)
+        for cls in torch.unique(old_labels):
+            mask = old_labels == cls
+            self.old_means[cls] = old_features[mask].mean(dim=0)
+        self.old_means = self.old_means / self.old_means.norm(dim=-1, keepdim=True)
+
+    def retrain_classifier(self, memory_loader):
+        self.classifier_head.train()
+        optimizer = torch.optim.Adam(self.classifier_head.parameters(), lr=self.lr/10.)
+        for epoch in range(self.args.finetune_epochs):
+            for x, y, _ in memory_loader:
+                x = x.cuda(device=self.args.default_gpu)
+                y = y.cuda(device=self.args.default_gpu)
+                _, feats = self.model(x, y, test=False, return_mean=True)
+                logits = self.classifier_head(feats[1])
+                loss = F.cross_entropy(logits, y)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+        self.classifier_head.eval()

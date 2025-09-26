@@ -106,6 +106,7 @@ def parse_option():
     parser.add_argument("--base-task-cls", type=int, default=60, help='num of classes in base task')
     parser.add_argument("--k-shot", type=int, default=5, help='num of training images per class')
 
+    parser.add_argument("--use_fc_head", action='store_true', help='Use FC head for classification')
 
     args, unparsed = parser.parse_known_args()
     args.mean_per_class = False
@@ -227,6 +228,10 @@ def main(args):
         prompt_templates = inc_dataset.prompt_templates
         data = {'train_loader': train_loader, 'class_names': class_name, 'prompt_templates': prompt_templates}
         
+        if memory is not None:
+            memory_loader = inc_dataset.get_memory_loader(memory)
+            data['memory_loader'] = memory_loader
+            
         model_fitted = model.fit(data)
         model.post_training(finalize=False)
         memory_loader = None

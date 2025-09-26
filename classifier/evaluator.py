@@ -27,6 +27,8 @@ class Evaluator():
         self.time_step_to_future_task_acc = {}
         self.time_step_to_test_id_to_module_id = {}
         
+        self.use_fc_head = getattr(args, 'use_fc_head', False)  # Lấy từ args, mặc định False
+        self.old_means = None
 
     def flush_task_to_accs(self):
         self.task_to_original_acc = {}
@@ -84,10 +86,14 @@ class Evaluator():
                 pred_y_ = pred_y_.permute(1, 0, 2)
             ood_preds.append(pred_y_.clone().cpu())
             pred_y = pred_y_.mean(0) if pred_y_.dim() == 3 else pred_y_
-            pred_y = pred_y.softmax(dim=-1)
+            if self.use_fc_head:
+                pred_y = pred_y  # FC head đã áp dụng trong inference, không cần softmax lại
+            else:
+                pred_y = pred_y.softmax(dim=-1)
             _, top_labels = pred_y.topk(1, dim=-1)
-            acc_count += (top_labels.view(-1)==y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
+            acc_count += (top_labels.view(-1) == y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
             total_count += y.shape[0]
+
         ood_preds = torch.cat(ood_preds, 0)
         acc = acc_count*1.0/total_count
         acc = acc.item()
@@ -137,8 +143,12 @@ class Evaluator():
                     inference_times.append(time.time() - start_time)
                     
                     pred_y = pred_y_.mean(0) if pred_y_.dim() == 3 else pred_y_
-                    pred_y = pred_y.softmax(dim=-1)
+                    if self.use_fc_head:
+                        pred_y = pred_y  # FC head đã áp dụng, không cần softmax
+                    else:
+                        pred_y = pred_y.softmax(dim=-1)
                     _, top_labels = pred_y.topk(1, dim=-1)
+
                     acc_count += (top_labels.view(-1)==y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
                     total_count += y.shape[0]
                     if self.args.viz_module_selection:
@@ -231,7 +241,13 @@ class Evaluator():
                 textual_feats.append(feats[1])
                 indices.extend(idx)
                 labels.extend(y)
+            pred_y = pred_y.mean(0) if pred_y.dim() == 3 else pred_y
+            if self.use_fc_head:
+                pred_y = pred_y  # FC head đã áp dụng
+            else:
+                pred_y = pred_y.softmax(dim=-1)
             _, top_labels = pred_y.topk(1, dim=-1)
+            
             for c in range(n_class):
                 acc_per_class[c] += ((top_labels.view(-1) == y.cuda(device=self.args.default_gpu)) * (y.cuda(device=self.args.default_gpu)== c)).sum().item()
                 count_per_class[c] += (y.cuda(device=self.args.default_gpu) == c).sum().item()
