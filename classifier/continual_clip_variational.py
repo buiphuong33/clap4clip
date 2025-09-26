@@ -820,6 +820,8 @@ class ClClipVariational(Evaluator):
         self.model.eval()
         logits, feats = self.model(image, label, test=True, return_mean=False)
 
+        if feats[1] is None:
+            raise ValueError("Text features (feats[1]) is None. Check model.forward output with test=True and return_mean=False.")
         # Áp dụng mean shift compensation
         if self.old_means is not None and self.args.sess > 0:
             shift = self.old_means - self.model.frozen_text_features.mean(dim=0, keepdim=True)
