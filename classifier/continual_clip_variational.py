@@ -304,10 +304,9 @@ class CLIP(nn.Module):
                 samplewise_text_feats = samplewise_text_feats / samplewise_text_feats.norm(dim=-1, keepdim=True)
                 samplewise_text_feats = samplewise_text_feats[labels]
                 return logits, (visual_feats.detach().cpu(), samplewise_text_feats.detach().cpu())
-            if return_mean:
-                return logits.mean(0), (None, None)
             else:
-                return logits, (None,None)
+                text_features_processed = text_features_ if not return_mean else text_features_.mean(0)
+                return logits, (image_features_normed, text_features_processed)
 
         else:
             
