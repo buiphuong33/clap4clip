@@ -306,7 +306,7 @@ class CLIP(nn.Module):
                 return logits, (visual_feats.detach().cpu(), samplewise_text_feats.detach().cpu())
             else:
                 text_features_processed = text_features_ if not return_mean else text_features_.mean(0)
-                return logits, (image_features_normed, text_features_processed)
+                return logits, (image_features_normed.to(torch.float32), text_features_processed.to(torch.float32))
 
         else:
             
@@ -444,7 +444,7 @@ class CLIP(nn.Module):
                             self.classwise_centroids[label] = per_sample_text_feats_[label].unsqueeze(0)
                         else:
                             self.classwise_centroids[label] = torch.cat([self.classwise_centroids[label], per_sample_text_feats_[label].unsqueeze(0)], 0)
-                  
+            print(f"Forward text_features_processed dtype: {text_features_processed.dtype}")
             return logits, (kl_loss, prior_matching_loss, avg_cos_distance)
 
     def get_kld_loss(self, logits, logits_prior):
@@ -514,7 +514,9 @@ class ClClipVariational(Evaluator):
         # Thêm cho mean shift và FC head
         self.old_means = None  # Lưu mean cũ từ task trước
         self.classifier_head = None  # Lớp FC head
-        self.args.use_fc_head = getattr(args, 'use_fc_head', False)  #
+        self.args.use_fc_head = getattr(args, 'use_fc_head', False) 
+        if self.args.use_fc_head:
+            self.classifier_head = nn.Linear(self.model.dtype, self.n_class).cuda(device=self.args.default_gpu) #
 
         # for distillation
         self.previous_mu_adapters, self.previous_mu_global_adapter = None, None
@@ -828,8 +830,8 @@ class ClClipVariational(Evaluator):
 
         # Áp dụng FC head nếu bật
         if self.args.use_fc_head and self.classifier_head is not None:
-            logits = self.classifier_head(feats[1])
-
+            logits = self.classifier_head(feats[1].to(torch.float32))
+        print(f"Inference feats[1] dtype: {feats[1].dtype}, classifier_head weight dtype: {self.classifier_head.weight.dtype}")
         return logits.float(), feats
 
     
