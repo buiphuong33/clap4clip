@@ -516,7 +516,7 @@ class ClClipVariational(Evaluator):
         self.classifier_head = None  # Lớp FC head
         self.args.use_fc_head = getattr(args, 'use_fc_head', False) 
         if self.args.use_fc_head:
-            self.classifier_head = nn.Linear(self.model.dtype, self.n_class).cuda(device=self.args.default_gpu) #
+            self.classifier_head = nn.Linear(self.clip_model.dtype, self.n_class).cuda(device=self.args.default_gpu) #
 
         # for distillation
         self.previous_mu_adapters, self.previous_mu_global_adapter = None, None
