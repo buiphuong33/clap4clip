@@ -119,12 +119,12 @@ class CLIP(nn.Module):
             init_with_task_embed(self.sigma_adapters[-1], var=True)
 
     def unpack_prev_components(self, previous_components):
-        previous_mu, previous_sigma, previous_task_tokens, previous_vga, previous_mu_global_adapter, previous_sigma_global_adapter  = previous_components
-        self.previous_mu_adapters = previous_mu
-        self.previous_sigma_adapters = previous_sigma
-        self.previous_task_tokens = previous_task_tokens
-        self.previous_vga = previous_vga
-        self.previous_mu_global_adapter, self.previous_sigma_global_adapter = previous_mu_global_adapter, previous_sigma_global_adapter
+        if len(previous_components) == 6:
+            (self.previous_mu_adapters, self.previous_sigma_adapters, 
+            self.previous_task_tokens, self.previous_vga, 
+            self.previous_mu_global_adapter, self.previous_sigma_global_adapter) = previous_components
+        else:
+            raise ValueError(f"Expected 6 components, got {len(previous_components)}")
 
     @torch.no_grad()
     def prior_text_features(self):
@@ -444,7 +444,6 @@ class CLIP(nn.Module):
                             self.classwise_centroids[label] = per_sample_text_feats_[label].unsqueeze(0)
                         else:
                             self.classwise_centroids[label] = torch.cat([self.classwise_centroids[label], per_sample_text_feats_[label].unsqueeze(0)], 0)
-            print(f"Forward text_features_processed dtype: {text_features_processed.dtype}")
             return logits, (kl_loss, prior_matching_loss, avg_cos_distance)
 
     def get_kld_loss(self, logits, logits_prior):
@@ -517,7 +516,8 @@ class ClClipVariational(Evaluator):
         self.classifier_head = None  # Lớp FC head
         self.args.use_fc_head = getattr(args, 'use_fc_head', False) 
         if self.args.use_fc_head:
-            self.classifier_head = nn.Linear(self.clip_model.dtype, self.n_class).cuda(device=self.args.default_gpu) #
+            ctx_dim = self.clip_model.ln_final.weight.shape[0]
+            self.classifier_head = nn.Linear(ctx_dim, self.n_class).cuda(device=self.args.default_gpu)
 
         # for distillation
         self.previous_mu_adapters, self.previous_mu_global_adapter = None, None
@@ -781,7 +781,8 @@ class ClClipVariational(Evaluator):
 
             # Khởi tạo classifier_head nếu use_fc_head
         if self.args.use_fc_head and self.classifier_head is None:
-            self.classifier_head = nn.Linear(self.model.frozen_text_features.shape[1], self.n_class).cuda(device=self.args.default_gpu)
+            feature_dim = self.model.frozen_text_features.shape[1]
+            self.classifier_head = nn.Linear(feature_dim, self.n_class).cuda(device=self.args.default_gpu)
             nn.init.xavier_uniform_(self.classifier_head.weight)
             nn.init.constant_(self.classifier_head.bias, 0)
 
@@ -831,8 +832,8 @@ class ClClipVariational(Evaluator):
 
         # Áp dụng FC head nếu bật
         if self.args.use_fc_head and self.classifier_head is not None:
-            logits = self.classifier_head(feats[1].to(torch.float32))
-        print(f"Inference feats[1] dtype: {feats[1].dtype}, classifier_head weight dtype: {self.classifier_head.weight.dtype}")
+            feats_input = feats[1].to(self.classifier_head.weight.dtype)
+            logits = self.classifier_head(feats_input)
         return logits.float(), feats
 
     
@@ -883,16 +884,33 @@ class ClClipVariational(Evaluator):
         self.old_means = self.old_means / self.old_means.norm(dim=-1, keepdim=True)
 
     def retrain_classifier(self, memory_loader):
+        if self.classifier_head is None:
+            print("Warning: classifier_head is None, skipping retraining")
+            return
+            
         self.classifier_head.train()
         optimizer = torch.optim.Adam(self.classifier_head.parameters(), lr=self.lr/10.)
+        
         for epoch in range(self.args.finetune_epochs):
             for x, y, _ in memory_loader:
                 x = x.cuda(device=self.args.default_gpu)
                 y = y.cuda(device=self.args.default_gpu)
-                _, feats = self.model(x, y, test=False, return_mean=True)
-                logits = self.classifier_head(feats[1])
-                loss = F.cross_entropy(logits, y)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                
+                try:
+                    _, feats = self.model(x, y, test=False, return_mean=True)
+                    if feats[1] is None:
+                        continue
+                        
+                    # Đảm bảo type consistency
+                    feats_input = feats[1].to(self.classifier_head.weight.dtype)
+                    logits = self.classifier_head(feats_input)
+                    loss = F.cross_entropy(logits, y)
+                    
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                except Exception as e:
+                    print(f"Error in retrain_classifier: {e}")
+                    continue
+                    
         self.classifier_head.eval()
