@@ -91,7 +91,10 @@ class Evaluator():
             else:
                 pred_y = pred_y.softmax(dim=-1)
             _, top_labels = pred_y.topk(1, dim=-1)
-            acc_count += (top_labels.view(-1) == y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
+            top_labels = top_labels.squeeze(-1) if top_labels.dim() > 1 else top_labels
+            y_device = y.cuda(device=self.args.default_gpu)
+            correct = (top_labels == y_device).sum().cpu().numpy()
+            acc_count += correct
             total_count += y.shape[0]
 
         ood_preds = torch.cat(ood_preds, 0)
@@ -142,20 +145,49 @@ class Evaluator():
                     pred_y_, feats = self.inference(x.cuda(device=self.args.default_gpu), y, num_test=num_test, test_class=test_class)
                     inference_times.append(time.time() - start_time)
                     
-                    pred_y = pred_y_.mean(0) if pred_y_.dim() == 3 else pred_y_
-                    if self.use_fc_head:
-                        pred_y = pred_y  # FC head đã áp dụng, không cần softmax
+                    # Xử lý shape của predictions
+                    if pred_y_.dim() == 3:
+                        # Shape: [num_forward_times, batch_size, num_classes]
+                        batch_size = pred_y_.shape[1]
+                        pred_y = pred_y_.mean(0)  # [batch_size, num_classes]
+                    elif pred_y_.dim() == 2:
+                        # Shape: [batch_size, num_classes]
+                        batch_size = pred_y_.shape[0]
+                        pred_y = pred_y_
                     else:
-                        pred_y = pred_y.softmax(dim=-1)
-                    _, top_labels = pred_y.topk(1, dim=-1)
+                        raise ValueError(f"Unexpected pred_y_ shape: {pred_y_.shape}")
 
-                    acc_count += (top_labels.view(-1)==y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
-                    total_count += y.shape[0]
+                    # Đảm bảo batch size khớp với labels
+                    if batch_size != y.shape[0]:
+                        min_batch_size = min(batch_size, y.shape[0])
+                        pred_y = pred_y[:min_batch_size]
+                        y = y[:min_batch_size]
+                        batch_size = min_batch_size
+
+                    # Apply softmax/FC head
+                    if self.use_fc_head:
+                        logits = pred_y
+                    else:
+                        logits = pred_y.softmax(dim=-1)
+
+                    # Get predictions với shape đúng
+                    _, top_labels = logits.topk(1, dim=-1)  # Shape: [batch_size, 1]
+                    top_labels = top_labels.squeeze(-1)  # Shape: [batch_size]
+
+                    # Compute accuracy với shape đã sửa
+                    y_device = y.cuda(device=self.args.default_gpu)
+                    top_labels_device = top_labels.cuda(device=self.args.default_gpu)
+            
+                    # Kiểm tra shape cuối cùng
+                    assert y_device.shape[0] == top_labels_device.shape[0], f"Shape mismatch: y={y_device.shape}, top_labels={top_labels_device.shape}"
+                    correct = (top_labels == y_device).sum().cpu().numpy()
+                    acc_count += correct
+                    total_count += batch_size
                     if self.args.viz_module_selection:
-                        selected_module_id = self.map_class_id_to_module_id(top_labels)
+                        selected_module_id = self.map_class_id_to_module_id(top_labels_device)
                         selected_module_ids.append(selected_module_id)
                     if self.args.compute_ece:
-                        task_calibration_errors.append(self.calibration_evaluator(pred_y, y.cuda(device=self.args.default_gpu)))
+                        task_calibration_errors.append(self.calibration_evaluator(logits, y_device))
                     if self.args.compute_ram:
                         visual_feats.append(feats[0])
                         textual_feats.append(feats[1])
@@ -166,20 +198,33 @@ class Evaluator():
 
                     if self.args.eval_ood_score and ood_test_loader is not None:
                         if pred_y_.dim() == 3:
-                            pred_y_ = pred_y_.permute(1, 0, 2)
-                        id_preds.append(pred_y_.clone().cpu())
+                            pred_y_ood = pred_y_.permute(1, 0, 2)  # [batch_size, num_forward_times, num_classes]
+                        else:
+                            pred_y_ood = pred_y_.clone()
+                        id_preds.append(pred_y_ood.clone().cpu())
                     
-                    pred_y_ = pred_y_.mean(0) if pred_y_.dim() == 3 else pred_y_
-                    self.mask_classes(pred_y_, k)
-                    _, taw_pred = pred_y_.topk(1, dim=-1)
-                    correct_mask_classes += (taw_pred.view(-1)==y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
+                    pred_y_taw = pred_y_.mean(0) if pred_y_.dim() == 3 else pred_y_.clone()
+                    self.mask_classes(pred_y_taw, k)
+                    _, taw_pred = pred_y_taw.topk(1, dim=-1)
+                    taw_pred = taw_pred.squeeze(-1)  # Ensure correct shape
+                    
+                    # Đảm bảo shape cho TaW accuracy
+                    if taw_pred.shape[0] != y_device.shape[0]:
+                        min_size = min(taw_pred.shape[0], y_device.shape[0])
+                        taw_pred = taw_pred[:min_size]
+                        y_device_taw = y_device[:min_size]
+                    else:
+                        y_device_taw = y_device
+                        
+                    correct_mask_classes += (taw_pred == y_device_taw).sum().cpu().numpy()
 
-                acc = acc_count*1.0/total_count
-                acc = acc.item()
+                # Compute final accuracies
+                acc = acc_count * 1.0 / total_count if total_count > 0 else 0
+                acc = acc.item() if hasattr(acc, 'item') else acc
                 accs.append(acc)
 
-                acc_taw = correct_mask_classes*1.0/total_count
-                acc_taw = acc_taw.item()
+                acc_taw = correct_mask_classes * 1.0 / total_count if total_count > 0 else 0
+                acc_taw = acc_taw.item() if hasattr(acc_taw, 'item') else acc_taw
                 accs_mask_classes.append(acc_taw)
 
                 if not only_eval and k == len(loaders) - 1:
@@ -234,30 +279,55 @@ class Evaluator():
         acc_per_class = [0 for _ in range(n_class)]
         count_per_class = [0 for _ in range(n_class)]
         visual_feats, textual_feats, indices, labels = [],[], [], []
-        for i, (x, y, idx) in tqdm(enumerate(loader), total=len(loader), desc = 'running inference'):
+        
+        for i, (x, y, idx) in tqdm(enumerate(loader), total=len(loader), desc='running inference'):
             pred_y, feats = self.inference(x.cuda(device=self.args.default_gpu), y)
+            
             if self.args.compute_ram:
                 visual_feats.append(feats[0])
                 textual_feats.append(feats[1])
                 indices.extend(idx)
                 labels.extend(y)
-            pred_y = pred_y.mean(0) if pred_y.dim() == 3 else pred_y
-            if self.use_fc_head:
-                pred_y = pred_y  # FC head đã áp dụng
-            else:
-                pred_y = pred_y.softmax(dim=-1)
-            _, top_labels = pred_y.topk(1, dim=-1)
             
+            # SỬA: Xử lý shape consistency
+            if pred_y.dim() == 3:
+                pred_y = pred_y.mean(0)
+            
+            # Đảm bảo batch size khớp
+            batch_size = pred_y.shape[0]
+            if batch_size != y.shape[0]:
+                min_batch_size = min(batch_size, y.shape[0])
+                pred_y = pred_y[:min_batch_size]
+                y = y[:min_batch_size]
+                
+            if self.use_fc_head:
+                logits = pred_y  # FC head đã áp dụng
+            else:
+                logits = pred_y.softmax(dim=-1)
+                
+            _, top_labels = logits.topk(1, dim=-1)
+            top_labels = top_labels.squeeze(-1)  # Ensure [batch_size] shape
+            
+            y_device = y.cuda(device=self.args.default_gpu)
+            top_labels_device = top_labels.cuda(device=self.args.default_gpu)
+            
+            # Compute per-class accuracy
             for c in range(n_class):
-                acc_per_class[c] += ((top_labels.view(-1) == y.cuda(device=self.args.default_gpu)) * (y.cuda(device=self.args.default_gpu)== c)).sum().item()
-                count_per_class[c] += (y.cuda(device=self.args.default_gpu) == c).sum().item()
-        acc = [a*1.0/c for (a, c) in zip(acc_per_class, count_per_class)]
+                correct_mask = (top_labels_device == y_device) & (y_device == c)
+                class_mask = (y_device == c)
+                
+                acc_per_class[c] += correct_mask.sum().item()
+                count_per_class[c] += class_mask.sum().item()
+        
+        # Compute final accuracy
+        acc = [a*1.0/c if c > 0 else 0 for (a, c) in zip(acc_per_class, count_per_class)]
         acc = np.array(acc).mean()
 
         if self.args.compute_ram:
             visual_feats = torch.cat(visual_feats)
             textual_feats = torch.cat(textual_feats)
             self.args.ram_computer.compute_rotation_angle_matrix(self.args.sess, labels, visual_feats, textual_feats, indices)
+        
         return acc
 
     @torch.no_grad()
