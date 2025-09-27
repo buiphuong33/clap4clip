@@ -511,6 +511,7 @@ class ClClipVariational(Evaluator):
         self.task_to_cls_num = {}
         self.task_to_distribution = {}
 
+        self.n_class = args.num_class
         # Thêm cho mean shift và FC head
         self.old_means = None  # Lưu mean cũ từ task trước
         self.classifier_head = None  # Lớp FC head
