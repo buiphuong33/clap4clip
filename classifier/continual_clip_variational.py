@@ -240,7 +240,7 @@ class CLIP(nn.Module):
         """Tính và lưu anchor cho task hiện tại"""
         all_embeddings = []
         for images, _, _ in dataloader:  # giả sử batch = (images, labels, index)
-            imgs_emb = self.image_encoder(images.cuda(self.args.default_gpu)).detach()
+            imgs_emb = self.image_encoder(images.to(dtype=self.image_encoder.conv1.weight.dtype, device=f'cuda:{self.args.default_gpu}')).detach()
             imgs_emb = imgs_emb / imgs_emb.norm(dim=-1, keepdim=True)
             all_embeddings.append(imgs_emb.cpu())
         all_embeddings = torch.cat(all_embeddings, dim=0)
