@@ -369,6 +369,12 @@ class CLIP(nn.Module):
                         samplewise_text_feats.append(text_features_relevant)
                 # logits = torch.stack(logits, 0).sum(0)
                 logits = torch.cat(logits, -1)
+                # Đảm bảo số lớp đúng bằng tổng số lớp hiện tại (tránh lệch do xử lý đặc biệt)
+                expected_num_classes = 0
+                for t in range(self.args.sess+1):
+                    expected_num_classes += self.task_to_cls_num[t]
+                if logits.shape[-1] != expected_num_classes:
+                    logits = logits[..., :expected_num_classes]
                 logits = logits.detach()
             if self.args.compute_ram:
                 visual_feats = image_features_normed
