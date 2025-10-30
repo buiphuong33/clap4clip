@@ -133,20 +133,44 @@ class Evaluator():
                 selected_module_ids = []
                 for i, (x, y, idx) in tqdm(enumerate(loader), total=len(loader), desc=f"Task {k} inference:"):
                     start_time = time.time()
+
                     pred_y_, feats = self.inference(x.cuda(device=self.args.default_gpu), y, num_test=num_test, test_class=test_class)
                     inference_times.append(time.time() - start_time)
-                    
-                    pred_y = pred_y_.mean(0) if pred_y_.dim() == 3 else pred_y_
-                    pred_y = pred_y.softmax(dim=-1)
+
+                    # Chuẩn hóa shape dự đoán về [batch, num_classes]
+                    if pred_y_.dim() >= 3:
+                        # Gộp tất cả chiều sample phía trước batch bằng mean
+                        # Ví dụ: [T, B, C] -> mean(0) => [B, C]
+                        #        [Tg, T, B, C] -> mean(0).mean(0) => [B, C]
+                        while pred_y_.dim() > 2:
+                            pred_y_ = pred_y_.mean(0)
+
+                    pred_y = pred_y_.softmax(dim=-1)  # [B, C]
                     _, top_labels = pred_y.topk(1, dim=-1)
                     acc_count += (top_labels.view(-1)==y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
                     total_count += y.shape[0]
+
                     if self.args.viz_module_selection:
                         selected_module_id = self.map_class_id_to_module_id(top_labels)
                         selected_module_ids.append(selected_module_id)
+
                     if self.args.compute_ece:
+                        # pred_y lúc này chắc chắn là [B, C]
                         task_calibration_errors.append(self.calibration_evaluator(pred_y, y.cuda(device=self.args.default_gpu)))
-                    if self.args.compute_ram:
+                    # pred_y_, feats = self.inference(x.cuda(device=self.args.default_gpu), y, num_test=num_test, test_class=test_class)
+                    # inference_times.append(time.time() - start_time)
+                    
+                    # pred_y = pred_y_.mean(0) if pred_y_.dim() == 3 else pred_y_
+                    # pred_y = pred_y.softmax(dim=-1)
+                    # _, top_labels = pred_y.topk(1, dim=-1)
+                    # acc_count += (top_labels.view(-1)==y.cuda(device=self.args.default_gpu)).sum().cpu().numpy()
+                    # total_count += y.shape[0]
+                    # if self.args.viz_module_selection:
+                    #     selected_module_id = self.map_class_id_to_module_id(top_labels)
+                    #     selected_module_ids.append(selected_module_id)
+                    # if self.args.compute_ece:
+                    #     task_calibration_errors.append(self.calibration_evaluator(pred_y, y.cuda(device=self.args.default_gpu)))
+                    # if self.args.compute_ram:
                         visual_feats.append(feats[0])
                         textual_feats.append(feats[1])
                         indices.append(deepcopy(idx))
