@@ -97,145 +97,34 @@ class CLIP(nn.Module):
         self.classwise_centroids = {}
         self.task_to_distribution = task_to_distribution
         self.init_new_heads()
-
+        self.task_anchors = {}  # dict: task_id -> mean image embedding
     
-    def init_new_heads(self):
-        def get_new_task_embed(var=False):
-            if var:
-                new_class_embeds = self.frozen_text_features_individual.var(1)
-            else:
-                new_class_embeds = self.frozen_text_features_individual.mean(1)
-            layer_embeds = new_class_embeds.t() @ new_class_embeds
-            # layer_embeds = layer_embeds / layer_embeds.norm()
-            layer_embeds = layer_embeds / layer_embeds.shape[0]   
-            return layer_embeds  
-        def init_with_task_embed(module, var=False):
-            layer_embeds = get_new_task_embed(var=var)
-            for m in module.fc.children():
-                if isinstance(m, torch.nn.Linear):
-                    m.weight.copy_(layer_embeds)
-        with torch.no_grad():
-            init_with_task_embed(self.mu_adapters[-1])
-            init_with_task_embed(self.sigma_adapters[-1], var=True)
-
-    def unpack_prev_components(self, previous_components):
-        previous_mu, previous_sigma, previous_task_tokens, previous_vga, previous_mu_global_adapter, previous_sigma_global_adapter  = previous_components
-        self.previous_mu_adapters = previous_mu
-        self.previous_sigma_adapters = previous_sigma
-        self.previous_task_tokens = previous_task_tokens
-        self.previous_vga = previous_vga
-        self.previous_mu_global_adapter, self.previous_sigma_global_adapter = previous_mu_global_adapter, previous_sigma_global_adapter
-
     @torch.no_grad()
-    def prior_text_features(self):
-        prompts = [[temp.format(c.replace("_", " ")) for temp in self.prompt_templates] for c in self.current_class_names]
-        text_features_, text_features_per_prompt = [], []
-        for per_cls_prompts in prompts:
-            per_cls_prompt_embs = tokenize(per_cls_prompts).cuda(device=self.args.default_gpu)
-            text_features = self.pretrained_text_encoder(per_cls_prompt_embs)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            text_features_per_prompt.append(text_features)
-            text_features = text_features.mean(dim=0)
-            text_features = text_features / text_features.norm()
-            text_features_.append(text_features)
-        self.frozen_text_features = torch.stack(text_features_, dim=0)
-        self.frozen_text_features_individual = torch.stack(text_features_per_prompt, dim=0)
-    
-    def get_variational_adapter_features(self, x, i=None, distill=False, global_adapter=False):
-        if global_adapter:
-            mu_adapter = self.previous_mu_global_adapter if distill else self.mu_global_adapter
-            sigma_adapter = self.previous_sigma_global_adapter if distill else self.sigma_global_adapter
-        else:
-            mu_adapter = self.previous_mu_adapters[i] if distill else self.mu_adapters[i] 
-            sigma_adapter = self.previous_sigma_adapters[i] if distill else self.sigma_adapters[i]
-        mu = mu_adapter(x)
-        sigma = sigma_adapter(x)
-        dist = Normal(mu, sigma)
-        return dist
-    
-    def get_prior_from_memory(self, x_for_prior, text_features, task_num):
-        with torch.no_grad():
-            n_class = self.n_class
-            image_features = self.image_encoder(x_for_prior.to(text_features.device).type(self.dtype))
-            image_features = (image_features / image_features.norm(dim=-1, keepdim=True)).detach()
-        vga_features = self.vga(text_features.clone().unsqueeze(0), image_features.unsqueeze(0)).squeeze(0)
-        text_featues_ =   vga_features + text_features
-        pdist = self.get_variational_adapter_features(text_featues_, task_num if self.args.expandable_adapter else 0)
-        return pdist 
+    def compute_task_anchor(self, task_id, dataloader):
+        """Tính và lưu anchor cho task hiện tại"""
+        all_embeddings = []
+        for images, _, _ in dataloader:  # giả sử batch = (images, labels, index)
+            imgs_emb = self.image_encoder(images.cuda(self.args.default_gpu)).detach()
+            imgs_emb = imgs_emb / imgs_emb.norm(dim=-1, keepdim=True)
+            all_embeddings.append(imgs_emb.cpu())
+        all_embeddings = torch.cat(all_embeddings, dim=0)
+        anchor = all_embeddings.mean(dim=0)
+        self.task_anchors[task_id] = anchor
 
-    def get_prior_dist(self, image_features=None, text_features=None, batch_labels=None, task_num=None, task_specific_labels=None, task_token=None, use_np_prior=False, global_adapter=False, tgt_mask=None):
-        if not use_np_prior:
-            return Normal(torch.zeros_like(text_features), torch.ones_like(text_features))
-        context_indices = get_context_indices(image_features.size(0), batch_labels, task_specific_labels if task_num > 0 else None, context_size=self.args.context_size)
-        if len(context_indices) == 0 :
-            # no task-specific data points so resort to standard normal prior
-            return Normal(torch.zeros_like(text_features), torch.ones_like(text_features))
-        else:
-            image_features = image_features[context_indices]
-            nquery = text_features.size(0)
-            query =  torch.cat([text_features.unsqueeze(0), task_token], 1) if task_token is not None else text_features.unsqueeze(0)
-            vga_features = self.vga(query, image_features.unsqueeze(0), tgt_mask=tgt_mask).squeeze(0)
-            text_features_ = vga_features[:nquery]  + text_features
-            if task_token is not None:
-                text_features_ = text_features_ + vga_features[-1]
-            pdist = self.get_variational_adapter_features(text_features_, task_num if self.args.expandable_adapter else 0, global_adapter=global_adapter)
-        
-        return pdist
+    def select_task_by_anchor(self, image):
+        """Chọn task gần nhất với ảnh theo anchor"""
+        img_emb = self.image_encoder(image.type(self.dtype))
+        img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
+        best_task = None
+        max_sim = -float('inf')
+        for tid, anchor in self.task_anchors.items():
+            anchor = anchor.to(img_emb.device)
+            sim = F.cosine_similarity(img_emb, anchor.unsqueeze(0)).mean()  # anchor=[D] or [1,D]
+            if sim > max_sim:
+                max_sim = sim
+                best_task = tid
+        return best_task if best_task is not None else self.args.sess  # fallback if empty
 
-
-    @staticmethod
-    def get_contrastive_matrix(text_feats, image_feats, logit_scale=None):
-        text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
-        if logit_scale is not None:
-            image_feats = image_feats.clone() * logit_scale
-        contrastive_matrix = image_feats @ text_feats.t() # 16 x 16 matrix
-        return contrastive_matrix
-    
-    def get_attention_mask(self, attn_shape, nb_task_tokens, original_query_num):
-        """Mask so that task tokens don't interact together.
-
-        Given two task tokens (t1, t2) and three patch tokens (p1, p2, p3), the
-        attention matrix is:
-
-        t1-t1 t1-t2 t1-p1 t1-p2 t1-p3
-        t2-t1 t2-t2 t2-p1 t2-p2 t2-p3
-
-        So that the mask (True values are deleted) should be:
-
-        False True False False False
-        True False False False False
-        """
-        mask = torch.zeros(attn_shape, dtype=torch.bool).cuda(device=self.args.default_gpu)
-        if self.args.expandable_tokens:
-            for i in range(nb_task_tokens):
-                mask[original_query_num+i, original_query_num:original_query_num+i] = True
-                mask[original_query_num+i, original_query_num+i+1:original_query_num+nb_task_tokens] = True
-
-        start_cls_idx, end_cls_idx = 0, 0 
-        for i in range(nb_task_tokens):
-            start_cls_idx = end_cls_idx
-            end_cls_idx += self.task_to_cls_num[i]
-            curr_class_indices = np.arange(start_cls_idx, end_cls_idx)
-            for cls in curr_class_indices:
-                mask[cls][:start_cls_idx] = True 
-                mask[cls][end_cls_idx:] = True
-                if self.args.expandable_tokens:
-                    mask[cls][original_query_num+i] = False
-            if self.args.expandable_tokens:
-                mask[original_query_num+i, :start_cls_idx] = True 
-                mask[original_query_num+i, end_cls_idx:original_query_num] = True
-        return mask
-
-    def get_avg_inter_adapter_distance(self, per_task_samples):
-        pairwise_distances = []
-        # per_task_samples = per_task_samples / per_task_samples.norm(dim=-1, keepdim=True)
-        for i in range(per_task_samples.shape[0]):
-            for j in range(i, per_task_samples.shape[0]):
-                cos = ((per_task_samples[i] * per_task_samples[j])/(per_task_samples[i].shape[0]*per_task_samples[j].shape[1])).sum()
-                pairwise_distances.append(1-cos.item())
-        avg_distance = np.mean(pairwise_distances)
-        return avg_distance
-        
     def forward(self, image, labels=None, test=False, finetuning=False, return_mean=True, for_prior=None):
         with torch.no_grad():
             image_features = self.image_encoder(image.type(self.dtype))
@@ -613,6 +502,7 @@ class ClClipVariational(Evaluator):
         print(f"Average run time: {np.mean(run_times)}")
         self.model.eval()
         
+        self.model.compute_task_anchor(self.args.sess, train_loader)
         if self.model.vga is not None:
             self.model.vga.train()
         return self.model
