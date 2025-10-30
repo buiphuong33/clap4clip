@@ -334,10 +334,13 @@ class CLIP(nn.Module):
                     # Lấy max số sample trong batch
                     times = max(batch_times)
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)
-                    rsamples = qdist.rsample([times])
-                    text_feat_unsq = text_features_.unsqueeze(0).expand(times, -1, -1)
-                    text_features_expand = rsamples + text_feat_unsq
-                    logits_ = logit_scale * image_features_normed @ text_features_expand.permute(0,2,1)  # [times, batch, n_class_this_task]
+                    rsamples = qdist.rsample([self.forward_times])
+                    text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
+                    if self.args.hierarchical:
+                        rsamples = rsamples.flatten(0, 1)
+                        text_features_ = text_features_.flatten(0, 1)
+                    text_features_ = rsamples + text_features_ 
+                    logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1)
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
