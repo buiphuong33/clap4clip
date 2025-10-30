@@ -335,17 +335,35 @@ class CLIP(nn.Module):
                     times = max(batch_times)
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)
                     rsamples = qdist.rsample([times])
-                    if text_features_.dim() == 2:
+
+                    # Chuẩn hóa text_feat_unsq về đúng 3 chiều
+                    if text_features_.dim() == 1:
+                        # [d] => [1, 1, d]
+                        text_feat_unsq = text_features_.unsqueeze(0).unsqueeze(0)
+                    elif text_features_.dim() == 2:
+                        # [n, d] => [1, n, d] -> [times, n, d]
                         text_feat_unsq = text_features_.unsqueeze(0).expand(times, -1, -1)
                     elif text_features_.dim() == 3:
-                        # [n, d1, d2] → [1, n, d1, d2] → [times, n, d1, d2]
-                        text_feat_unsq = text_features_.unsqueeze(0).expand(times, *text_features_.shape)
-                    elif text_features_.dim() == 1:
-                        text_feat_unsq = text_features_.unsqueeze(0).unsqueeze(0).expand(times, 1, -1)
+                        # [n, d1, d2] => không nên xảy ra cho embedding thông thường
+                        if text_features_.shape[0] == 1:
+                            text_feat_unsq = text_features_.expand(times, -1, -1)
+                        else:
+                            text_feat_unsq = text_features_  # fallback, nhưng thường là bug/model sai shape
+                        # Nếu vẫn 4D sau cộng, bóp lại shape cho chuẩn
                     else:
-                        raise RuntimeError(f"text_features_ shape {text_features_.shape} is not handled!")
+                        raise RuntimeError(f"text_features_ shape {text_features_.shape} not supported")
+
                     text_features_expand = rsamples + text_feat_unsq
-                    logits_ = logit_scale * image_features_normed @ text_features_expand.permute(0,2,1)
+
+                    # Nếu ra 4D (do text features lồng quá sâu), cần flatten hoặc squeeze lại:
+                    if text_features_expand.dim() == 4:
+                        # thường là [times, N1, N2, D], bạn phải gộp N1*N2 lại
+                        times, n1, n2, d = text_features_expand.shape
+                        text_features_expand = text_features_expand.view(times, n1*n2, d)
+
+                    assert text_features_expand.dim() == 3, f"Expect [times, n, d], got {text_features_expand.shape}"
+                    logits_ = logit_scale * image_features_normed @ text_features_expand.permute(0, 2, 1)
+                    
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
