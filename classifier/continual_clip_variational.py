@@ -97,7 +97,19 @@ class CLIP(nn.Module):
         self.classwise_centroids = {}
         self.task_to_distribution = task_to_distribution
         self.init_new_heads()
-        self.task_anchors = {}  # dict: task_id -> mean image embedding
+
+          # --- [NEW] Anchor routing hyper-params & storages ---
+        # moving-average anchors per task
+        self.task_img_anchor = {}   # {task_id: [D]}
+        self.task_txt_anchor = {}   # {task_id: [D]}
+        # hyper-params (có thể đưa vào args, ở đây set default an toàn)
+        self.anchor_momentum = getattr(args, "anchor_momentum", 0.9)   # EMA cho image anchors
+        self.anchor_alpha    = getattr(args, "anchor_alpha", 1.0)      # trọng số image anchor
+        self.anchor_beta     = getattr(args, "anchor_beta", 1.0)       # trọng số text anchor
+        self.anchor_temp     = getattr(args, "anchor_temp", 0.07)      # temperature cho softmax
+        self.use_anchor_routing = getattr(args, "use_anchor_routing", True)
+        self._dtype = clip_model.dtype
+
     
     def init_new_heads(self):
         def get_new_task_embed(var=False):
@@ -182,6 +194,7 @@ class CLIP(nn.Module):
         
         return pdist
 
+
     @staticmethod
     def get_contrastive_matrix(text_feats, image_feats, logit_scale=None):
         text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
@@ -226,47 +239,111 @@ class CLIP(nn.Module):
         return mask
 
     def get_avg_inter_adapter_distance(self, per_task_samples):
-        pairwise_distances = []
-        # per_task_samples = per_task_samples / per_task_samples.norm(dim=-1, keepdim=True)
-        for i in range(per_task_samples.shape[0]):
-            for j in range(i, per_task_samples.shape[0]):
-                cos = ((per_task_samples[i] * per_task_samples[j])/(per_task_samples[i].shape[0]*per_task_samples[j].shape[1])).sum()
-                pairwise_distances.append(1-cos.item())
-        avg_distance = np.mean(pairwise_distances)
-        return avg_distance
+        with torch.no_grad():
+            vec = per_task_samples.mean(1)      # [T, D]
+            vec = F.normalize(vec, dim=-1)
+            sims = vec @ vec.t()                # [T, T]
+            T = sims.size(0)
+            vals = []
+            for i in range(T):
+                for j in range(i+1, T):
+                    vals.append(1 - sims[i, j].item())
+            return float(np.mean(vals)) if vals else 0.0
+    
+        # --- [NEW] utils for anchor routing ---------------------------------------
+    @torch.no_grad()
+    def _ensure_text_anchors(self):
+        """Text anchor của mỗi task = mean của frozen_text_features trên các lớp thuộc task đó."""
+        if len(self.task_txt_anchor) == self.args.sess + 1:
+            return
+        start, end = 0, 0
+        for ti in range(self.args.sess + 1):
+            start = end
+            end += self.task_to_cls_num[ti]
+            seg = self.frozen_text_features[start:end]                     # [C_i, D]
+            anchor = seg.mean(0)                                           # [D]
+            anchor = anchor / anchor.norm()
+            self.task_txt_anchor[ti] = anchor.detach()
 
     @torch.no_grad()
-    def compute_task_anchor(self, task_id, dataloader):
-        """Tính và lưu anchor cho task hiện tại"""
-        all_embeddings = []
-        for images, _, _ in dataloader:  # giả sử batch = (images, labels, index)
-            imgs_emb = self.image_encoder(images.to(dtype=self.image_encoder.conv1.weight.dtype, device=f'cuda:{self.args.default_gpu}')).detach()
-            imgs_emb = imgs_emb / imgs_emb.norm(dim=-1, keepdim=True)
-            all_embeddings.append(imgs_emb.cpu())
-        all_embeddings = torch.cat(all_embeddings, dim=0)
-        anchor = all_embeddings.mean(dim=0)
-        self.task_anchors[task_id] = anchor
+    def _update_image_anchors(self, image_features_normed, labels):
+        """Cập nhật image anchor per task bằng EMA; nếu batch không có lớp thuộc task nào đó thì bỏ qua."""
+        # cần mapping: class_id -> task_id (đã được điền dần trong forward train)
+        if not self.class_to_task_mapping:
+            return
+        # gom vector ảnh theo task từ labels trong batch
+        B = labels.numel()
+        for ti in range(self.args.sess + 1):
+            # tìm tất cả class id thuộc task ti
+            cls_ids = [cid for cid, t in self.class_to_task_mapping.items() if t == ti]
+            if len(cls_ids) == 0:
+                continue
+            mask = torch.zeros(B, dtype=torch.bool, device=labels.device)
+            for cid in cls_ids:
+                mask |= (labels == cid)
+            if mask.any():
+                feat = image_features_normed[mask].mean(0)                 # [D]
+                feat = feat / feat.norm()
+                if ti in self.task_img_anchor:
+                    self.task_img_anchor[ti] = (
+                        self.anchor_momentum * self.task_img_anchor[ti] +
+                        (1 - self.anchor_momentum) * feat
+                    )
+                    self.task_img_anchor[ti] = self.task_img_anchor[ti] / self.task_img_anchor[ti].norm()
+                else:
+                    self.task_img_anchor[ti] = feat.detach()
 
-    def select_task_by_anchor(self, image):
-        """Chọn task gần nhất với ảnh theo anchor"""
-        img_emb = self.image_encoder(image.type(self.dtype))
-        img_emb = img_emb / img_emb.norm(dim=-1, keepdim=True)
-        best_task = None
-        max_sim = -float('inf')
-        for tid, anchor in self.task_anchors.items():
-            anchor = anchor.to(img_emb.device)
-            sim = F.cosine_similarity(img_emb, anchor.unsqueeze(0)).mean()  # anchor=[D] or [1,D]
-            if sim > max_sim:
-                max_sim = sim
-                best_task = tid
-        return best_task if best_task is not None else self.args.sess  # fallback if empty
+    @torch.no_grad()
+    def _get_anchor_weights(self, image_features_normed):
+        """
+        Tính weight d_c cho mỗi task theo công thức:
+          s_c = alpha*cos(img, m_v^c) + beta*cos(<text mean>, m_t^c)
+          d   = softmax(s / T)
+        Trả về: d shape [B, #tasks]
+        """
+        # phải có ít nhất text anchors; nếu chưa có thì khởi tạo
+        self._ensure_text_anchors()
 
+        # stack anchors theo task
+        tasks = self.args.sess + 1
+        # image anchors: nếu task nào chưa có thì tạm lấy mean ảnh của batch làm "giả"
+        img_anchors = []
+        for ti in range(tasks):
+            if ti in self.task_img_anchor:
+                img_anchors.append(self.task_img_anchor[ti])
+            else:
+                # fallback: mean ảnh batch (không khuyến nghị lâu dài, nhưng chạy an toàn)
+                mean_b = image_features_normed.mean(0)
+                img_anchors.append((mean_b / mean_b.norm()).detach())
+        img_anchors = torch.stack(img_anchors, 0).to(image_features_normed.device)  # [T, D]
+
+        txt_anchors = torch.stack([self.task_txt_anchor[ti] for ti in range(tasks)], 0).to(image_features_normed.device)  # [T, D]
+
+        # cosine per-image với từng anchor
+        v = F.normalize(image_features_normed, dim=-1)        # [B, D]
+        mv = F.normalize(img_anchors, dim=-1)                 # [T, D]
+        mt = F.normalize(txt_anchors, dim=-1)                 # [T, D]
+
+        sim_v = v @ mv.t()    # [B, T]
+        # dùng mean text của batch đối chiếu với text anchor (nhẹ nhàng, không cần text của từng sample)
+        # hoặc dùng hằng số 1 nếu bạn chỉ muốn dựa trên image anchor
+        sim_t = (v @ mt.t()) * 0 + 1.0    # "tắt" thành phần text nếu không muốn dùng
+        # Nếu muốn dùng text thực sự: bạn có thể thay dòng trên bằng 1 hằng số, hoặc
+        # kết hợp một vector text trung bình theo batch (tuỳ thiết kế prompts bạn đang chạy).
+
+        s = self.anchor_alpha * sim_v + self.anchor_beta * sim_t
+        d = F.softmax(s / self.anchor_temp, dim=-1)           # [B, T]
+        return d
+
+        
     def forward(self, image, labels=None, test=False, finetuning=False, return_mean=True, for_prior=None):
         with torch.no_grad():
             image_features = self.image_encoder(image.type(self.dtype))
             image_features_normed = image_features / image_features.norm(dim=-1, keepdim=True)
             image_features = image_features_normed.detach()
             image_features_normed = image_features_normed.detach()
+            if labels is not None and self.use_anchor_routing:
+                self._update_image_anchors(image_features_normed, labels)
 
         n_class = self.n_class
         prev_cls_num = self.n_class - self.task_to_cls_num[self.args.sess]
@@ -292,16 +369,20 @@ class CLIP(nn.Module):
                     rsamples_g = qdist_g.rsample([self.forward_times_global])
 
                 logits =[]
-                n_class = self.n_class
-                logit_scale = self.logit_scale.exp()
-                # Anchor routing (tìm best task cho từng ảnh trong batch)
-                if hasattr(self, 'task_anchors') and len(self.task_anchors) > 0:
-                    batch_best_task = [self.select_task_by_anchor(image[b:b+1]) for b in range(image.shape[0])]
-                else:
-                    batch_best_task = [self.args.sess] * image.shape[0]
-                logits = []
                 samplewise_text_feats = []
                 start_cls_idx, end_cls_idx = 0, 0
+
+                if self.use_anchor_routing:
+                    d_weights = self._get_anchor_weights(image_features_normed)   # [B, T]
+                    avg_w = d_weights.mean(0)    # [T]
+                    alloc = (avg_w * self.forward_times).round().to(torch.int64)
+                    if alloc.sum().item() == 0:
+                        top = torch.argmax(avg_w).item()
+                        alloc[top] = 1
+                else:
+                    d_weights = None
+                    alloc = None
+
                 for i in range(self.args.sess+1):
                     start_cls_idx = end_cls_idx
                     end_cls_idx += self.task_to_cls_num[i]
@@ -315,45 +396,27 @@ class CLIP(nn.Module):
                     if self.args.hierarchical:
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
-                    rsamples = qdist.rsample([self.forward_times])
-                   
+                    n_samples_task = int(alloc[i].item()) if (self.use_anchor_routing and alloc is not None) else self.forward_times
+                    if n_samples_task == 0:
+                        continue
+                    rsamples = qdist.rsample([n_samples_task])
+                                    
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                     if self.args.hierarchical:
                         rsamples = rsamples.flatten(0, 1)
                         text_features_ = text_features_.flatten(0, 1)
                     text_features_ = rsamples + text_features_ 
                     
-                    # Ensure text_features_ has the correct 3D shape [times, n, d] for logits computation
-                    # Handle cases where it might have different dimensions
-                    if text_features_.dim() == 1:
-                        text_features_expand = text_features_.unsqueeze(0).unsqueeze(0)
-                    elif text_features_.dim() == 2:
-                        # If 2D, expand to match expected sampling dimension
-                        text_features_expand = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
-                    elif text_features_.dim() == 3:
-                        # Already has sampling dimension, use as is
-                        text_features_expand = text_features_
-                    elif text_features_.dim() == 4:
-                        # Flatten extra dimensions if 4D
-                        times, n1, n2, d = text_features_.shape
-                        text_features_expand = text_features_.view(times, n1*n2, d)
-                    else:
-                        raise RuntimeError(f"text_features_ shape {text_features_.shape} not supported")
+                    logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1) 
+                    if self.use_anchor_routing and d_weights is not None:
+                        w = d_weights[:, i].view(1, -1, 1)  # [1, B, 1]
+                        logits_ = logits_ * w
 
-                    assert text_features_expand.dim() == 3, f"Expect [times, n, d], got {text_features_expand.shape}"
-                    logits_ = logit_scale * image_features_normed @ text_features_expand.permute(0, 2, 1)
-                    
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
                 # logits = torch.stack(logits, 0).sum(0)
                 logits = torch.cat(logits, -1)
-                # Đảm bảo số lớp đúng bằng tổng số lớp hiện tại (tránh lệch do xử lý đặc biệt)
-                expected_num_classes = 0
-                for t in range(self.args.sess+1):
-                    expected_num_classes += self.task_to_cls_num[t]
-                if logits.shape[-1] != expected_num_classes:
-                    logits = logits[..., :expected_num_classes]
                 logits = logits.detach()
             if self.args.compute_ram:
                 visual_feats = image_features_normed
@@ -364,7 +427,7 @@ class CLIP(nn.Module):
             if return_mean:
                 return logits.mean(0), (None, None)
             else:
-                return logits, (None, None)
+                return logits, (None,None)
 
         else:
             
@@ -421,6 +484,20 @@ class CLIP(nn.Module):
             per_sample_text_feats = []
             taskwise_means = []
 
+            if self.use_anchor_routing:
+                d_weights = self._get_anchor_weights(image_features_normed)   # [B, T]
+                # lấy trung bình theo batch để quyết định số sample cho mỗi task (giữ tổng ~ forward_times)
+                avg_w = d_weights.mean(0)    # [T]
+                # phân bổ số lần sampling theo trọng số (tổng ~ self.forward_times)
+                alloc = (avg_w * self.forward_times).round().to(torch.int64)
+                # đảm bảo ít nhất task mạnh nhất có >=1 mẫu
+                if alloc.sum().item() == 0:
+                    top = torch.argmax(avg_w).item()
+                    alloc[top] = 1
+            else:
+                d_weights = None
+                alloc = None
+
             for i in range(self.args.sess+1):
                 
                 start_cls_idx = end_cls_idx
@@ -440,8 +517,16 @@ class CLIP(nn.Module):
 
                 if self.args.hierarchical:
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
+                
+                if self.use_anchor_routing and alloc is not None:
+                    n_samples_task = int(alloc[i].item())
+                else:
+                    n_samples_task = self.forward_times
+                if n_samples_task == 0:
+                    # bỏ qua task quá yếu trong batch này
+                    continue
                 qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
-                rsamples = qdist.rsample([self.forward_times])
+                rsamples = qdist.rsample([self.n_samples_task])
                 
                 text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                 if self.args.hierarchical:
@@ -469,6 +554,10 @@ class CLIP(nn.Module):
                                                 )
                     prior_matching_losses.append(kl_divergence(qdist, pdist).mean(0).sum() * 0.001)    
                 
+                if self.use_anchor_routing and d_weights is not None:
+                    w = d_weights[:, i].view(1, -1, 1)   # [1, B, 1]
+                    logits_ = logits_ * w
+
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
                     with torch.no_grad():                        
@@ -534,7 +623,8 @@ class CLIP(nn.Module):
 
     @property #变成属性
     def dtype(self):
-        return self.image_encoder.conv1.weight.dtype #return int/float
+        return self._dtype
+        #return self.image_encoder.conv1.weight.dtype #return int/float
 
 
 class ClClipVariational(Evaluator):
@@ -670,7 +760,6 @@ class ClClipVariational(Evaluator):
         print(f"Average run time: {np.mean(run_times)}")
         self.model.eval()
         
-        self.model.compute_task_anchor(self.args.sess, train_loader)
         if self.model.vga is not None:
             self.model.vga.train()
         return self.model
