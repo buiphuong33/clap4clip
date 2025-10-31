@@ -526,9 +526,9 @@ class CLIP(nn.Module):
                     # bỏ qua task quá yếu trong batch này
                     continue
                 qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
-                rsamples = qdist.rsample([self.n_samples_task])
+                rsamples = qdist.rsample([n_samples_task])
                 
-                text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
+                text_features_ = text_features_.unsqueeze(0).expand(n_samples_task, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(n_samples_task, -1, -1)
                 if self.args.hierarchical:
                     rsamples = rsamples.flatten(0, 1)
                     text_features_ = text_features_.flatten(0, 1)
