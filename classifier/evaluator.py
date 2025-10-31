@@ -170,7 +170,7 @@ class Evaluator():
                     #     selected_module_ids.append(selected_module_id)
                     # if self.args.compute_ece:
                     #     task_calibration_errors.append(self.calibration_evaluator(pred_y, y.cuda(device=self.args.default_gpu)))
-                    # if self.args.compute_ram:
+                    if self.args.compute_ram:
                         visual_feats.append(feats[0])
                         textual_feats.append(feats[1])
                         indices.append(deepcopy(idx))
