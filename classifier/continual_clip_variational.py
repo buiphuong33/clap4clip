@@ -426,9 +426,9 @@ class CLIP(nn.Module):
                     text_features_ = rsamples + text_features_ 
                     
                     logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1) 
-                    if self.use_anchor_routing and d_weights is not None:
-                        w = d_weights[:, i].view(1, -1, 1)  # [1, B, 1]
-                        logits_ = logits_ * w
+                    # if self.use_anchor_routing and d_weights is not None:
+                    #     w = d_weights[:, i].view(1, -1, 1)  # [1, B, 1]
+                    #     logits_ = logits_ * w
 
                     logits_ = logits_.mean(0, keepdim=True)
                     logits.append(logits_)
@@ -591,9 +591,9 @@ class CLIP(nn.Module):
                                                 )
                     prior_matching_losses.append(kl_divergence(qdist, pdist).mean(0).sum() * 0.001)    
                 
-                if self.use_anchor_routing and d_weights is not None:
-                    w = d_weights[:, i].view(1, -1, 1)   # [1, B, 1]
-                    logits_ = logits_ * w
+                # if self.use_anchor_routing and d_weights is not None:
+                #     w = d_weights[:, i].view(1, -1, 1)   # [1, B, 1]
+                #     logits_ = logits_ * w
 
                 logits_ = logits_.mean(0, keepdim=True)
                 logits.append(logits_)
