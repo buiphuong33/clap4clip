@@ -400,8 +400,12 @@ class CLIP(nn.Module):
                     if n_samples_task == 0:
                         continue
                     rsamples = qdist.rsample([n_samples_task])
-                                    
-                    text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
+                    text_features_ = (
+                        text_features_.unsqueeze(0).expand(n_samples_task, -1, -1, -1)
+                        if self.args.hierarchical
+                        else text_features_.unsqueeze(0).expand(n_samples_task, -1, -1)
+                    )            
+                    #text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                     if self.args.hierarchical:
                         rsamples = rsamples.flatten(0, 1)
                         text_features_ = text_features_.flatten(0, 1)
@@ -412,6 +416,7 @@ class CLIP(nn.Module):
                         w = d_weights[:, i].view(1, -1, 1)  # [1, B, 1]
                         logits_ = logits_ * w
 
+                    logits_ = logits_.mean(0, keepdim=True)
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
@@ -527,8 +532,12 @@ class CLIP(nn.Module):
                     continue
                 qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                 rsamples = qdist.rsample([n_samples_task])
-                
-                text_features_ = text_features_.unsqueeze(0).expand(n_samples_task, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(n_samples_task, -1, -1)
+                text_features_ = (
+                    text_features_.unsqueeze(0).expand(n_samples_task, -1, -1, -1)
+                    if self.args.hierarchical
+                    else text_features_.unsqueeze(0).expand(n_samples_task, -1, -1)
+                )
+                #text_features_ = text_features_.unsqueeze(0).expand(n_samples_task, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(n_samples_task, -1, -1)
                 if self.args.hierarchical:
                     rsamples = rsamples.flatten(0, 1)
                     text_features_ = text_features_.flatten(0, 1)
@@ -558,6 +567,7 @@ class CLIP(nn.Module):
                     w = d_weights[:, i].view(1, -1, 1)   # [1, B, 1]
                     logits_ = logits_ * w
 
+                logits_ = logits_.mean(0, keepdim=True)
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
                     with torch.no_grad():                        
