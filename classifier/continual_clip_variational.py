@@ -852,7 +852,7 @@ class ClClipVariational(Evaluator):
                 # pdb.set_trace()
                 #y = y.cuda(device=self.args.default_gpu)
                 # pdb.set_trace()
-                #loss = 0.
+                loss = 0.
                 output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(
                     x.cuda(device=self.args.default_gpu),
                     y.cuda(device=self.args.default_gpu),
