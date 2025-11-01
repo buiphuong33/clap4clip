@@ -771,7 +771,7 @@ class ClClipVariational(Evaluator):
                     run_time = time.time() - start_time
                     run_times.append(run_time)
                     #y = y.cuda(device=self.args.default_gpu)
-                    #loss = 0.
+                    loss = 0.
                     # pdb.set_trace()
                     if self.args.variational:
                         targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
