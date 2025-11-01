@@ -376,6 +376,20 @@ class CLIP(nn.Module):
                     d_weights = self._get_anchor_weights(image_features_normed)   # [B, T]
                     avg_w = d_weights.mean(0)    # [T]
                     alloc = (avg_w * self.forward_times).round().to(torch.int64)
+                    
+                    if labels is not None:
+                        # tính biên lớp cho từng task
+                        bounds = []
+                        _end = 0
+                        for ti in range(self.args.sess + 1):
+                            _start = _end
+                            _end += self.task_to_cls_num[ti]
+                            bounds.append((_start, _end))
+                        # task nào xuất hiện trong batch?
+                        for ti, (lo, hi) in enumerate(bounds):
+                            if ((labels >= lo) & (labels < hi)).any():
+                                if alloc[ti].item() == 0:
+                                    alloc[ti] = 1
                     if alloc.sum().item() == 0:
                         top = torch.argmax(avg_w).item()
                         alloc[top] = 1
@@ -496,6 +510,20 @@ class CLIP(nn.Module):
                 # phân bổ số lần sampling theo trọng số (tổng ~ self.forward_times)
                 alloc = (avg_w * self.forward_times).round().to(torch.int64)
                 # đảm bảo ít nhất task mạnh nhất có >=1 mẫu
+                
+                if labels is not None:
+                    # tính biên lớp cho từng task
+                    bounds = []
+                    _end = 0
+                    for ti in range(self.args.sess + 1):
+                        _start = _end
+                        _end += self.task_to_cls_num[ti]
+                        bounds.append((_start, _end))
+                    # task nào xuất hiện trong batch?
+                    for ti, (lo, hi) in enumerate(bounds):
+                        if ((labels >= lo) & (labels < hi)).any():
+                            if alloc[ti].item() == 0:
+                                alloc[ti] = 1
                 if alloc.sum().item() == 0:
                     top = torch.argmax(avg_w).item()
                     alloc[top] = 1
@@ -581,7 +609,7 @@ class CLIP(nn.Module):
                 kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * 5)
                 
             logits = torch.cat(logits, -1)
-           
+            logits = logits.mean(0)
             kl_loss = sum(kl_losses)  if len(kl_losses) else 0.
             prior_matching_loss = sum(prior_matching_losses) 
             # prior_matching_loss = prior_matching_loss * 0.01 #if not finetuning else prior_matching_loss * 0.1 
