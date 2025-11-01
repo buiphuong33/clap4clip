@@ -845,16 +845,26 @@ class ClClipVariational(Evaluator):
                 self.cur_iter_idx = cur_iter_idx
                 self.scheduler.step(cur_iter_idx)
 
-                output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x.cuda(device=self.args.default_gpu), y, finetuning=True)
+                #output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x.cuda(device=self.args.default_gpu), y, finetuning=True)
                 # pdb.set_trace()
-                y = y.cuda(device=self.args.default_gpu)
+                #y = y.cuda(device=self.args.default_gpu)
                 # pdb.set_trace()
                 loss = 0.
-                if self.args.variational:
-                    targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
-                    output = output.view(-1, output.shape[-1])
-                else:
-                    targets = y 
+                output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(
+                    x.cuda(device=self.args.default_gpu),
+                    y.cuda(device=self.args.default_gpu),
+                    finetuning=True
+                )
+
+            # chuẩn hoá shapes cho CE
+                targets = y.cuda(device=self.args.default_gpu)     # [B]
+                if output.dim() == 3:                              # phòng hờ nếu còn [1, B, C]
+                    output = output.mean(0)
+                # if self.args.variational:
+                #     targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
+                #     output = output.view(-1, output.shape[-1])
+                # else:
+                #     targets = y 
                 loss = loss + F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -866,7 +876,7 @@ class ClClipVariational(Evaluator):
             with torch.no_grad():
                 self.compute_class_centroids()
         if len(inter_adapter_distances):
-                print(f"Average inter-adapter distance: {np.mean(inter_adapter_distance)}")
+                print(f"Average inter-adapter distance: {np.mean(inter_adapter_distances)}")
 
         if self.args.sess > 0 and self.args.expandable_tokens:
             self.epoch_log()
