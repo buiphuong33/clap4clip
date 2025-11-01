@@ -735,77 +735,158 @@ class ClClipVariational(Evaluator):
             self.mu_global_adapter = Adapter(ctx_dim, ctx_dim).cuda(device=self.args.default_gpu).type(self.clip_model.dtype)
             self.sigma_global_adapter = Adapter(ctx_dim, ctx_dim, sigma=True).cuda(device=self.args.default_gpu).type(self.clip_model.dtype)
 
+    # def fit(self, data):
+    #     self.task_to_cls_num[self.args.sess] = len(data['class_names'])
+    #     self.current_class_names += data['class_names']
+    #     print(f"Classes: {self.current_class_names}")
+    #     train_loader = data['train_loader']
+
+    #     if len(train_loader.dataset)< self.train_batch:
+    #         real_img_bsz = len(train_loader.dataset)
+    #         self.lr = self.lr * real_img_bsz / self.train_batch 
+    #     else:
+    #         real_img_bsz = self.train_batch
+
+    #     per_epoch_steps = len(train_loader)
+
+    #     self.init_model(class_names=self.current_class_names, per_epoch_steps=per_epoch_steps, prompt_templates=data['prompt_templates'])
+
+    #     inter_adapter_distances = []
+    #     run_times = []
+    #     # self.model.eval()
+    #     if self.model.vga is not None:
+    #         self.model.vga.train()
+    #     if self.args.sess >= 0:
+    #         for epoch in tqdm(range(self.epochs)):
+    #             for idx, (x, y, index) in tqdm(enumerate(train_loader), total=len(train_loader), desc = 'Training'):
+
+    #                 cur_iter_idx = epoch*per_epoch_steps+idx
+    #                 self.cur_iter_idx = cur_iter_idx
+    #                 self.scheduler.step(cur_iter_idx)
+    #                 start_time = time.time()
+    #                 #output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x.cuda(device=self.args.default_gpu), y)
+    #                 # output, (kl_loss, prior_matching_loss, inter_adapter_distance) = \
+    #                 # self.model(x.cuda(device=self.args.default_gpu),
+    #                 #          y.cuda(device=self.args.default_gpu))
+    #                 run_time = time.time() - start_time
+    #                 run_times.append(run_time)
+    #                 #y = y.cuda(device=self.args.default_gpu)
+    #                 loss = 0.
+    #                 # pdb.set_trace()
+    #                 if self.args.variational:
+    #                     targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
+    #                     # if self.args.sess > 0:
+    #                     #     loss = loss + self.get_div_loss(output.clone(), targets.clone()) * 0.01
+    #                     output = output.view(-1, output.shape[-1])
+    #                 else:
+    #                     targets = y 
+    #                 output, (kl_loss, prior_matching_loss, _) = self.model(x.cuda(device=self.args.default_gpu),
+    #                                                    y.cuda(device=self.args.default_gpu))
+    #                 targets = y.cuda(device=self.args.default_gpu)
+    #                 loss = loss + F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
+    #                 self.optimizer.zero_grad()
+    #                 loss.backward()
+    #                 self.optimizer.step()
+                    
+    #                 if inter_adapter_distance is not None and (epoch == self.epochs-1):
+    #                     inter_adapter_distances.append(inter_adapter_distance)
+
+    #         if self.args.sess > 0 and self.args.expandable_tokens:
+    #             self.epoch_log()
+    #         if len(inter_adapter_distances):
+    #             print(f"Average inter-adapter distance: {np.mean(inter_adapter_distances)}")
+    #     # if self.args.sess == 9 and self.args.get_interclass_dist:
+    #     #     with torch.no_grad():
+    #     #         self.compute_class_centroids()
+
+    #     # pdb.set_trace()
+    #         # print(self.model.image_encoder.layer1[0].conv1.weight[0])
+    #     print(f"Average run time: {np.mean(run_times)}")
+    #     self.model.eval()
+        
+    #     if self.model.vga is not None:
+    #         self.model.vga.train()
+    #     return self.model
+
     def fit(self, data):
+    # cập nhật số lớp cho session hiện tại
         self.task_to_cls_num[self.args.sess] = len(data['class_names'])
         self.current_class_names += data['class_names']
         print(f"Classes: {self.current_class_names}")
+
         train_loader = data['train_loader']
 
-        if len(train_loader.dataset)< self.train_batch:
+        # điều chỉnh lr nếu batch nhỏ hơn train_batch
+        if len(train_loader.dataset) < self.train_batch:
             real_img_bsz = len(train_loader.dataset)
-            self.lr = self.lr * real_img_bsz / self.train_batch 
+            self.lr = self.lr * real_img_bsz / self.train_batch
         else:
             real_img_bsz = self.train_batch
 
         per_epoch_steps = len(train_loader)
 
-        self.init_model(class_names=self.current_class_names, per_epoch_steps=per_epoch_steps, prompt_templates=data['prompt_templates'])
+        # khởi tạo model/optimizer cho session mới
+        self.init_model(class_names=self.current_class_names,
+                        per_epoch_steps=per_epoch_steps,
+                        prompt_templates=data['prompt_templates'])
 
         inter_adapter_distances = []
         run_times = []
-        # self.model.eval()
+
+        # ĐẶT CHẾ ĐỘ TRAIN
+        self.model.train()
         if self.model.vga is not None:
             self.model.vga.train()
+
         if self.args.sess >= 0:
             for epoch in tqdm(range(self.epochs)):
-                for idx, (x, y, index) in tqdm(enumerate(train_loader), total=len(train_loader), desc = 'Training'):
-
-                    cur_iter_idx = epoch*per_epoch_steps+idx
+                for idx, (x, y, index) in tqdm(
+                    enumerate(train_loader), total=len(train_loader), desc='Training'
+                ):
+                    cur_iter_idx = epoch * per_epoch_steps + idx
                     self.cur_iter_idx = cur_iter_idx
                     self.scheduler.step(cur_iter_idx)
+
+                    # move data to device
+                    x = x.cuda(device=self.args.default_gpu, non_blocking=True)
+                    y = y.cuda(device=self.args.default_gpu, non_blocking=True)
+
+                    # đo thời gian FORWARD thực tế
                     start_time = time.time()
-                    #output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x.cuda(device=self.args.default_gpu), y)
-                    # output, (kl_loss, prior_matching_loss, inter_adapter_distance) = \
-                    # self.model(x.cuda(device=self.args.default_gpu),
-                    #          y.cuda(device=self.args.default_gpu))
-                    run_time = time.time() - start_time
-                    run_times.append(run_time)
-                    #y = y.cuda(device=self.args.default_gpu)
-                    loss = 0.
-                    # pdb.set_trace()
-                    if self.args.variational:
-                        targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
-                        # if self.args.sess > 0:
-                        #     loss = loss + self.get_div_loss(output.clone(), targets.clone()) * 0.01
-                        output = output.view(-1, output.shape[-1])
-                    else:
-                        targets = y 
-                    output, (kl_loss, prior_matching_loss, _) = self.model(x.cuda(device=self.args.default_gpu),
-                                                       y.cuda(device=self.args.default_gpu))
-                    targets = y.cuda(device=self.args.default_gpu)
-                    loss = loss + F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
-                    self.optimizer.zero_grad()
+                    output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x, y)
+                    run_times.append(time.time() - start_time)
+
+                    # chuẩn hóa shape logits & targets cho CE
+                    # forward() đã trả [B, C]; phòng hờ nếu còn [1, B, C] thì gộp
+                    if output.dim() == 3:
+                        output = output.mean(0)  # -> [B, C]
+                    targets = y  # KHÔNG expand theo sample nữa
+
+                    # tính loss
+                    loss = F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
+
+                    # step
+                    self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     self.optimizer.step()
-                    
-                    if inter_adapter_distance is not None and (epoch == self.epochs-1):
+
+                    # log inter-adapter distance nếu có
+                    if (inter_adapter_distance is not None) and (epoch == self.epochs - 1):
                         inter_adapter_distances.append(inter_adapter_distance)
 
+            # log sau epoch
             if self.args.sess > 0 and self.args.expandable_tokens:
                 self.epoch_log()
             if len(inter_adapter_distances):
                 print(f"Average inter-adapter distance: {np.mean(inter_adapter_distances)}")
-        # if self.args.sess == 9 and self.args.get_interclass_dist:
-        #     with torch.no_grad():
-        #         self.compute_class_centroids()
 
-        # pdb.set_trace()
-            # print(self.model.image_encoder.layer1[0].conv1.weight[0])
-        print(f"Average run time: {np.mean(run_times)}")
+        print(f"Average run time: {np.mean(run_times) if len(run_times) else 0.0:.6f}s")
+
+        # CHẾ ĐỘ EVAL SAU TRAIN
         self.model.eval()
-        
         if self.model.vga is not None:
-            self.model.vga.train()
+            self.model.vga.eval()
+
         return self.model
 
     @torch.no_grad()
