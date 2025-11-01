@@ -764,11 +764,14 @@ class ClClipVariational(Evaluator):
                     self.cur_iter_idx = cur_iter_idx
                     self.scheduler.step(cur_iter_idx)
                     start_time = time.time()
-                    output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x.cuda(device=self.args.default_gpu), y)
+                    #output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x.cuda(device=self.args.default_gpu), y)
+                    output, (kl_loss, prior_matching_loss, inter_adapter_distance) = \
+                    self.model(x.cuda(device=self.args.default_gpu),
+                             y.cuda(device=self.args.default_gpu))
                     run_time = time.time() - start_time
                     run_times.append(run_time)
-                    y = y.cuda(device=self.args.default_gpu)
-                    loss = 0.
+                    #y = y.cuda(device=self.args.default_gpu)
+                    #loss = 0.
                     # pdb.set_trace()
                     if self.args.variational:
                         targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
@@ -777,8 +780,8 @@ class ClClipVariational(Evaluator):
                         output = output.view(-1, output.shape[-1])
                     else:
                         targets = y 
-                    output, (kl_loss, prior_matching_loss, _) = self.model(x.cuda(device=self.args.default_gpu),
-                                                       y.cuda(device=self.args.default_gpu))
+                    #output, (kl_loss, prior_matching_loss, _) = self.model(x.cuda(device=self.args.default_gpu),
+                    #                                   y.cuda(device=self.args.default_gpu))
                     targets = y.cuda(device=self.args.default_gpu)
                     loss = loss + F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
                     self.optimizer.zero_grad()
@@ -791,7 +794,7 @@ class ClClipVariational(Evaluator):
             if self.args.sess > 0 and self.args.expandable_tokens:
                 self.epoch_log()
             if len(inter_adapter_distances):
-                print(f"Average inter-adapter distance: {np.mean(inter_adapter_distance)}")
+                print(f"Average inter-adapter distance: {np.mean(inter_adapter_distances)}")
         # if self.args.sess == 9 and self.args.get_interclass_dist:
         #     with torch.no_grad():
         #         self.compute_class_centroids()
@@ -849,7 +852,7 @@ class ClClipVariational(Evaluator):
                 # pdb.set_trace()
                 #y = y.cuda(device=self.args.default_gpu)
                 # pdb.set_trace()
-                loss = 0.
+                #loss = 0.
                 output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(
                     x.cuda(device=self.args.default_gpu),
                     y.cuda(device=self.args.default_gpu),
