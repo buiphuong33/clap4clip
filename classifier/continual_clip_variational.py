@@ -765,9 +765,9 @@ class ClClipVariational(Evaluator):
                     self.scheduler.step(cur_iter_idx)
                     start_time = time.time()
                     #output, (kl_loss, prior_matching_loss, inter_adapter_distance) = self.model(x.cuda(device=self.args.default_gpu), y)
-                    output, (kl_loss, prior_matching_loss, inter_adapter_distance) = \
-                    self.model(x.cuda(device=self.args.default_gpu),
-                             y.cuda(device=self.args.default_gpu))
+                    # output, (kl_loss, prior_matching_loss, inter_adapter_distance) = \
+                    # self.model(x.cuda(device=self.args.default_gpu),
+                    #          y.cuda(device=self.args.default_gpu))
                     run_time = time.time() - start_time
                     run_times.append(run_time)
                     #y = y.cuda(device=self.args.default_gpu)
@@ -780,8 +780,8 @@ class ClClipVariational(Evaluator):
                         output = output.view(-1, output.shape[-1])
                     else:
                         targets = y 
-                    #output, (kl_loss, prior_matching_loss, _) = self.model(x.cuda(device=self.args.default_gpu),
-                    #                                   y.cuda(device=self.args.default_gpu))
+                    output, (kl_loss, prior_matching_loss, _) = self.model(x.cuda(device=self.args.default_gpu),
+                                                       y.cuda(device=self.args.default_gpu))
                     targets = y.cuda(device=self.args.default_gpu)
                     loss = loss + F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
                     self.optimizer.zero_grad()
