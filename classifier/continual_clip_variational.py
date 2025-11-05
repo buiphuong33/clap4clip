@@ -431,12 +431,19 @@ class CLIP(nn.Module):
                     #     logits_ = logits_ * w
 
                     # Mean theo samples dimension để có shape [B, n_classes_task] - cần thiết khi các task có số samples khác nhau
-                    logits_ = logits_.mean(1)  # [B, n_classes_task]
+                    # Code gốc: tất cả task có cùng forward_times → có thể cat trực tiếp
+                    # Anchor routing: mỗi task có số samples khác nhau → phải mean trước khi cat
+                    if self.use_anchor_routing and alloc is not None:
+                        logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
                 # logits = torch.stack(logits, 0).sum(0)
                 logits = torch.cat(logits, -1)
+                # Nếu có anchor routing, các logits_ đã được mean(1) → shape [B, total_classes]
+                # Nếu không có anchor routing, logits có shape [B, forward_times, total_classes] → cần mean theo samples
+                if not self.use_anchor_routing or alloc is None:
+                    logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
                 logits = logits.detach()
             if self.args.compute_ram:
                 visual_feats = image_features_normed
@@ -595,8 +602,10 @@ class CLIP(nn.Module):
                 #     w = d_weights[:, i].view(1, -1, 1)   # [1, B, 1]
                 #     logits_ = logits_ * w
 
-                # Mean theo samples dimension để có shape [B, n_classes_task] - cần thiết khi các task có số samples khác nhau
-                logits_ = logits_.mean(1)  # [B, n_classes_task]
+                # Code gốc: tất cả task có cùng forward_times → có thể cat trực tiếp
+                # Anchor routing: mỗi task có số samples khác nhau → phải mean trước khi cat
+                if self.use_anchor_routing and alloc is not None:
+                    logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
                     with torch.no_grad():                        
@@ -610,7 +619,10 @@ class CLIP(nn.Module):
                 kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * 5)
                 
             logits = torch.cat(logits, -1)
-            # KHÔNG mean ở đây để giống code gốc - logits sẽ được xử lý ở nơi khác nếu cần
+            # Nếu có anchor routing, các logits_ đã được mean(1) → shape [B, total_classes]
+            # Nếu không có anchor routing, logits có shape [B, forward_times, total_classes] → cần mean theo samples
+            if not self.use_anchor_routing or alloc is None:
+                logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
             kl_loss = sum(kl_losses)  if len(kl_losses) else 0.
             prior_matching_loss = sum(prior_matching_losses) 
             # prior_matching_loss = prior_matching_loss * 0.01 #if not finetuning else prior_matching_loss * 0.1 
@@ -858,9 +870,14 @@ class ClClipVariational(Evaluator):
                     run_times.append(time.time() - start_time)
 
                     # chuẩn hóa shape logits & targets cho CE
-                    # forward() đã trả [B, C]; phòng hờ nếu còn [1, B, C] thì gộp
+                    # forward() đã trả [B, C] hoặc [B, forward_times, C] nếu chưa mean
                     if output.dim() == 3:
-                        output = output.mean(0)  # -> [B, C]
+                        # Nếu shape[0] == 1 thì là [1, B, C] → mean(0) để có [B, C]
+                        # Nếu shape[0] > 1 thì là [B, forward_times, C] → mean(1) để có [B, C]
+                        if output.shape[0] == 1:
+                            output = output.mean(0)  # [1, B, C] -> [B, C]
+                        else:
+                            output = output.mean(1)  # [B, forward_times, C] -> [B, C]
                     targets = y  # KHÔNG expand theo sample nữa
 
                     # tính loss
@@ -943,8 +960,11 @@ class ClClipVariational(Evaluator):
 
             # chuẩn hoá shapes cho CE
                 targets = y.cuda(device=self.args.default_gpu)     # [B]
-                if output.dim() == 3:                              # phòng hờ nếu còn [1, B, C]
-                    output = output.mean(0)
+                if output.dim() == 3:                              # phòng hờ nếu còn [1, B, C] hoặc [B, forward_times, C]
+                    if output.shape[0] == 1:
+                        output = output.mean(0)  # [1, B, C] -> [B, C]
+                    else:
+                        output = output.mean(1)  # [B, forward_times, C] -> [B, C]
                 # if self.args.variational:
                 #     targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
                 #     output = output.view(-1, output.shape[-1])
