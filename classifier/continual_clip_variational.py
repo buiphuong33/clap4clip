@@ -426,6 +426,9 @@ class CLIP(nn.Module):
                     
                     logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1) 
                     # logits_ shape: [B, n_samples_task, n_classes_task]
+                    # Đảm bảo logits_ có đúng shape: batch size phải khớp với image_features_normed
+                    if logits_.shape[0] != image_features_normed.shape[0]:
+                        raise ValueError(f"Batch size mismatch in logits_ (test mode): logits_.shape={logits_.shape}, image_features_normed.shape={image_features_normed.shape}, text_features_.shape={text_features_.shape}")
                     # if self.use_anchor_routing and d_weights is not None:
                     #     w = d_weights[:, i].view(1, -1, 1)  # [1, B, 1]
                     #     logits_ = logits_ * w
@@ -436,7 +439,12 @@ class CLIP(nn.Module):
                     # Đảm bảo: Nếu có anchor routing, TẤT CẢ task đều mean(1) để có cùng shape [B, n_classes_task]
                     if self.use_anchor_routing and alloc is not None:
                         # logits_ shape: [B, n_samples_task, n_classes_task]
+                        if logits_.dim() != 3:
+                            raise ValueError(f"logits_ should have shape [B, n_samples_task, n_classes_task] but got {logits_.shape}")
                         logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples dimension
+                        # Đảm bảo batch size vẫn đúng sau mean
+                        if logits_.shape[0] != image_features_normed.shape[0]:
+                            raise ValueError(f"Batch size mismatch after mean(1) (test mode): logits_.shape={logits_.shape}, image_features_normed.shape={image_features_normed.shape}")
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
@@ -596,6 +604,9 @@ class CLIP(nn.Module):
                     kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * self.args.beta)
                 logits_ = (logit_scale * image_features_normed @ text_features_.permute(0, 2, 1)) 
                 # logits_ shape: [B, n_samples_task, n_classes_task]
+                # Đảm bảo logits_ có đúng shape: batch size phải khớp với image_features_normed
+                if logits_.shape[0] != image_features_normed.shape[0]:
+                    raise ValueError(f"Batch size mismatch in logits_: logits_.shape={logits_.shape}, image_features_normed.shape={image_features_normed.shape}, text_features_.shape={text_features_.shape}")
                 if finetuning or (not finetuning and self.args.sess == i):
                     if self.args.frozen_prior:
                         prior_text_features = self.frozen_text_features_individual.clone()[start_cls_idx:end_cls_idx] 
@@ -618,7 +629,12 @@ class CLIP(nn.Module):
                 # Đảm bảo: Nếu có anchor routing, TẤT CẢ task đều mean(1) để có cùng shape [B, n_classes_task]
                 if self.use_anchor_routing and alloc is not None:
                     # logits_ shape: [B, n_samples_task, n_classes_task]
+                    if logits_.dim() != 3:
+                        raise ValueError(f"logits_ should have shape [B, n_samples_task, n_classes_task] but got {logits_.shape}")
                     logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples dimension
+                    # Đảm bảo batch size vẫn đúng sau mean
+                    if logits_.shape[0] != image_features_normed.shape[0]:
+                        raise ValueError(f"Batch size mismatch after mean(1): logits_.shape={logits_.shape}, image_features_normed.shape={image_features_normed.shape}")
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
                     with torch.no_grad():                        
