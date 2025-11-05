@@ -411,8 +411,7 @@ class CLIP(nn.Module):
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                     n_samples_task = int(alloc[i].item()) if (self.use_anchor_routing and alloc is not None) else self.forward_times
-                    if n_samples_task == 0:
-                        continue
+                    n_samples_task = max(1, n_samples_task)  # Đảm bảo ít nhất 1 sample
                     rsamples = qdist.rsample([n_samples_task])
                     text_features_ = (
                         text_features_.unsqueeze(0).expand(n_samples_task, -1, -1, -1)
@@ -555,9 +554,7 @@ class CLIP(nn.Module):
                     n_samples_task = int(alloc[i].item())
                 else:
                     n_samples_task = self.forward_times
-                if n_samples_task == 0:
-                    # bỏ qua task quá yếu trong batch này
-                    continue
+                n_samples_task = max(1, n_samples_task)  # Đảm bảo ít nhất 1 sample
                 qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                 rsamples = qdist.rsample([n_samples_task])
                 text_features_ = (
