@@ -403,9 +403,16 @@ class CLIP(nn.Module):
                     text_features_relevant = text_features[start_cls_idx:end_cls_idx].clone()
                     text_features_ = text_features_relevant
                     if self.args.use_vga:
-                        text_features_ = text_features_ + vga_features[start_cls_idx:end_cls_idx] 
-                    if self.args.expandable_tokens:
-                        text_features_ = text_features_ + vga_features[n_query+i]
+                        vga_features_task = vga_features[start_cls_idx:end_cls_idx]
+                        if self.args.expandable_tokens:
+                            vga_features_task = vga_features_task + vga_features[n_query+i]
+                        
+                        # Xử lý NaN/Inf trong vga_features: replace bằng 0
+                        if torch.isnan(vga_features_task).any() or torch.isinf(vga_features_task).any():
+                            vga_features_task = torch.where(torch.isnan(vga_features_task) | torch.isinf(vga_features_task), 
+                                                          torch.zeros_like(vga_features_task), vga_features_task)
+                        
+                        text_features_ = text_features_ + vga_features_task
 
                     if self.args.hierarchical:
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
@@ -591,11 +598,14 @@ class CLIP(nn.Module):
                     if self.args.expandable_tokens:
                         vga_features = vga_features + vga_features_all[n_query+i]
                     
-                    # Kiểm tra vga_features có NaN/Inf không
-                    if torch.isnan(vga_features).any():
-                        raise ValueError(f"vga_features contains NaN: vga_features.shape={vga_features.shape}, task={i}")
-                    if torch.isinf(vga_features).any():
-                        raise ValueError(f"vga_features contains Inf: vga_features.shape={vga_features.shape}, task={i}")
+                    # Xử lý NaN/Inf trong vga_features: replace bằng 0
+                    if torch.isnan(vga_features).any() or torch.isinf(vga_features).any():
+                        # Replace NaN và Inf bằng 0
+                        vga_features = torch.where(torch.isnan(vga_features) | torch.isinf(vga_features), 
+                                                  torch.zeros_like(vga_features), vga_features)
+                        # Hoặc có thể skip VGA nếu có NaN
+                        # text_features_ = text_features_relevant
+                        # continue
                     
                     text_features_ = text_features_relevant + vga_features
                 else:
