@@ -425,11 +425,13 @@ class CLIP(nn.Module):
                     text_features_ = rsamples + text_features_ 
                     
                     logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1) 
+                    # logits_ shape: [B, n_samples_task, n_classes_task]
                     # if self.use_anchor_routing and d_weights is not None:
                     #     w = d_weights[:, i].view(1, -1, 1)  # [1, B, 1]
                     #     logits_ = logits_ * w
 
-                    # KHÔNG mean ở đây để giống code gốc - mean sẽ được tính ở cuối nếu return_mean=True
+                    # Mean theo samples dimension để có shape [B, n_classes_task] - cần thiết khi các task có số samples khác nhau
+                    logits_ = logits_.mean(1)  # [B, n_classes_task]
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
@@ -575,6 +577,7 @@ class CLIP(nn.Module):
                     sims = sims.mean(2).mean(0)
                     kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * self.args.beta)
                 logits_ = (logit_scale * image_features_normed @ text_features_.permute(0, 2, 1)) 
+                # logits_ shape: [B, n_samples_task, n_classes_task]
                 if finetuning or (not finetuning and self.args.sess == i):
                     if self.args.frozen_prior:
                         prior_text_features = self.frozen_text_features_individual.clone()[start_cls_idx:end_cls_idx] 
@@ -592,7 +595,8 @@ class CLIP(nn.Module):
                 #     w = d_weights[:, i].view(1, -1, 1)   # [1, B, 1]
                 #     logits_ = logits_ * w
 
-                # KHÔNG mean ở đây để giống code gốc - mean sẽ được tính ở cuối
+                # Mean theo samples dimension để có shape [B, n_classes_task] - cần thiết khi các task có số samples khác nhau
+                logits_ = logits_.mean(1)  # [B, n_classes_task]
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
                     with torch.no_grad():                        
