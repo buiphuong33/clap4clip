@@ -429,7 +429,7 @@ class CLIP(nn.Module):
                     #     w = d_weights[:, i].view(1, -1, 1)  # [1, B, 1]
                     #     logits_ = logits_ * w
 
-                    logits_ = logits_.mean(0, keepdim=True)
+                    # KHÔNG mean ở đây để giống code gốc - mean sẽ được tính ở cuối nếu return_mean=True
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
@@ -592,7 +592,7 @@ class CLIP(nn.Module):
                 #     w = d_weights[:, i].view(1, -1, 1)   # [1, B, 1]
                 #     logits_ = logits_ * w
 
-                logits_ = logits_.mean(0, keepdim=True)
+                # KHÔNG mean ở đây để giống code gốc - mean sẽ được tính ở cuối
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
                     with torch.no_grad():                        
@@ -606,7 +606,7 @@ class CLIP(nn.Module):
                 kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * 5)
                 
             logits = torch.cat(logits, -1)
-            logits = logits.mean(0)
+            # KHÔNG mean ở đây để giống code gốc - logits sẽ được xử lý ở nơi khác nếu cần
             kl_loss = sum(kl_losses)  if len(kl_losses) else 0.
             prior_matching_loss = sum(prior_matching_losses) 
             # prior_matching_loss = prior_matching_loss * 0.01 #if not finetuning else prior_matching_loss * 0.1 
