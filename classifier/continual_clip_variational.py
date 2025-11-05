@@ -579,15 +579,35 @@ class CLIP(nn.Module):
                     self.class_to_task_mapping.update(dict(zip(np.arange(start_cls_idx, end_cls_idx), [i] * (end_cls_idx - start_cls_idx))))
 
                 text_features_relevant = text_features.clone()[start_cls_idx:end_cls_idx]
+                
+                # Kiểm tra text_features_relevant có NaN/Inf không
+                if torch.isnan(text_features_relevant).any():
+                    raise ValueError(f"text_features_relevant contains NaN: text_features_relevant.shape={text_features_relevant.shape}, task={i}, start_cls_idx={start_cls_idx}, end_cls_idx={end_cls_idx}")
+                if torch.isinf(text_features_relevant).any():
+                    raise ValueError(f"text_features_relevant contains Inf: text_features_relevant.shape={text_features_relevant.shape}, task={i}")
+                
                 if self.args.use_vga:
                     vga_features = vga_features_all[start_cls_idx:end_cls_idx]
                     if self.args.expandable_tokens:
                         vga_features = vga_features + vga_features_all[n_query+i]
+                    
+                    # Kiểm tra vga_features có NaN/Inf không
+                    if torch.isnan(vga_features).any():
+                        raise ValueError(f"vga_features contains NaN: vga_features.shape={vga_features.shape}, task={i}")
+                    if torch.isinf(vga_features).any():
+                        raise ValueError(f"vga_features contains Inf: vga_features.shape={vga_features.shape}, task={i}")
+                    
                     text_features_ = text_features_relevant + vga_features
                 else:
                     text_features_ = text_features_relevant
 
                 if self.args.hierarchical:
+                    # Kiểm tra rsamples_g có NaN/Inf không
+                    if torch.isnan(rsamples_g[:, start_cls_idx:end_cls_idx, :]).any():
+                        raise ValueError(f"rsamples_g contains NaN: rsamples_g.shape={rsamples_g.shape}, task={i}, start_cls_idx={start_cls_idx}, end_cls_idx={end_cls_idx}")
+                    if torch.isinf(rsamples_g[:, start_cls_idx:end_cls_idx, :]).any():
+                        raise ValueError(f"rsamples_g contains Inf: rsamples_g.shape={rsamples_g.shape}, task={i}")
+                    
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                 
                 if self.use_anchor_routing and alloc is not None:
@@ -598,7 +618,7 @@ class CLIP(nn.Module):
                 
                 # Kiểm tra text_features_ trước khi đưa vào get_variational_adapter_features
                 if torch.isnan(text_features_).any():
-                    raise ValueError(f"text_features_ contains NaN before get_variational_adapter_features: text_features_.shape={text_features_.shape}, task={i}")
+                    raise ValueError(f"text_features_ contains NaN before get_variational_adapter_features: text_features_.shape={text_features_.shape}, task={i}, use_vga={self.args.use_vga}, hierarchical={self.args.hierarchical}")
                 if torch.isinf(text_features_).any():
                     raise ValueError(f"text_features_ contains Inf before get_variational_adapter_features: text_features_.shape={text_features_.shape}, task={i}")
                 
