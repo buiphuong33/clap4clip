@@ -433,8 +433,10 @@ class CLIP(nn.Module):
                     # Mean theo samples dimension để có shape [B, n_classes_task] - cần thiết khi các task có số samples khác nhau
                     # Code gốc: tất cả task có cùng forward_times → có thể cat trực tiếp
                     # Anchor routing: mỗi task có số samples khác nhau → phải mean trước khi cat
+                    # Đảm bảo: Nếu có anchor routing, TẤT CẢ task đều mean(1) để có cùng shape [B, n_classes_task]
                     if self.use_anchor_routing and alloc is not None:
-                        logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples
+                        # logits_ shape: [B, n_samples_task, n_classes_task]
+                        logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples dimension
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
@@ -444,6 +446,7 @@ class CLIP(nn.Module):
                 # Nếu không có anchor routing, logits có shape [B, forward_times, total_classes] → cần mean theo samples
                 if not self.use_anchor_routing or alloc is None:
                     logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
+                # Đảm bảo logits có shape [B, total_classes] sau khi xử lý
                 logits = logits.detach()
             if self.args.compute_ram:
                 visual_feats = image_features_normed
@@ -604,8 +607,10 @@ class CLIP(nn.Module):
 
                 # Code gốc: tất cả task có cùng forward_times → có thể cat trực tiếp
                 # Anchor routing: mỗi task có số samples khác nhau → phải mean trước khi cat
+                # Đảm bảo: Nếu có anchor routing, TẤT CẢ task đều mean(1) để có cùng shape [B, n_classes_task]
                 if self.use_anchor_routing and alloc is not None:
-                    logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples
+                    # logits_ shape: [B, n_samples_task, n_classes_task]
+                    logits_ = logits_.mean(1)  # [B, n_classes_task] - mean theo samples dimension
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
                     with torch.no_grad():                        
@@ -622,7 +627,9 @@ class CLIP(nn.Module):
             # Nếu có anchor routing, các logits_ đã được mean(1) → shape [B, total_classes]
             # Nếu không có anchor routing, logits có shape [B, forward_times, total_classes] → cần mean theo samples
             if not self.use_anchor_routing or alloc is None:
+                # logits shape: [B, forward_times, total_classes]
                 logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
+            # Đảm bảo logits có shape [B, total_classes] sau khi xử lý
             kl_loss = sum(kl_losses)  if len(kl_losses) else 0.
             prior_matching_loss = sum(prior_matching_losses) 
             # prior_matching_loss = prior_matching_loss * 0.01 #if not finetuning else prior_matching_loss * 0.1 
@@ -870,15 +877,43 @@ class ClClipVariational(Evaluator):
                     run_times.append(time.time() - start_time)
 
                     # chuẩn hóa shape logits & targets cho CE
-                    # forward() đã trả [B, C] hoặc [B, forward_times, C] nếu chưa mean
+                    # forward() đã trả [B, C] hoặc có thể có shape khác nếu có lỗi
+                    # Đảm bảo output luôn có shape [B, C] trước khi tính loss
+                    original_output_shape = output.shape
                     if output.dim() == 3:
+                        # Kiểm tra shape để xác định dimension nào là batch
                         # Nếu shape[0] == 1 thì là [1, B, C] → mean(0) để có [B, C]
-                        # Nếu shape[0] > 1 thì là [B, forward_times, C] → mean(1) để có [B, C]
+                        # Nếu shape[1] == y.shape[0] thì là [B, forward_times, C] → mean(1) để có [B, C]
+                        # Nếu shape[0] == y.shape[0] thì là [forward_times, B, C] → mean(0) để có [B, C]
                         if output.shape[0] == 1:
                             output = output.mean(0)  # [1, B, C] -> [B, C]
+                        elif output.shape[1] == y.shape[0]:
+                            # [B, forward_times, C] -> mean(1) -> [B, C]
+                            output = output.mean(1)
+                        elif output.shape[0] == y.shape[0]:
+                            # [forward_times, B, C] -> mean(0) -> [B, C]
+                            output = output.mean(0)
                         else:
-                            output = output.mean(1)  # [B, forward_times, C] -> [B, C]
+                            # Không khớp, thử mean theo dimension đầu tiên
+                            output = output.mean(0)
+                    elif output.dim() == 2:
+                        # Đã có shape [B, C], nhưng cần đảm bảo batch size khớp
+                        if output.shape[0] != y.shape[0]:
+                            # Nếu không khớp, có thể cần reshape hoặc xử lý khác
+                            # Có thể là [1, C] hoặc [C, 1] - cần kiểm tra lại
+                            if output.shape[0] == 1:
+                                # [1, C] -> expand to [B, C]
+                                output = output.expand(y.shape[0], -1)
+                            elif output.shape[1] == y.shape[0]:
+                                # [C, B] -> transpose to [B, C]
+                                output = output.t()
+                            else:
+                                raise ValueError(f"Cannot match output shape {output.shape} to target batch size {y.shape[0]}")
                     targets = y  # KHÔNG expand theo sample nữa
+                    
+                    # Đảm bảo output và targets có cùng batch size
+                    if output.shape[0] != targets.shape[0]:
+                        raise ValueError(f"Batch size mismatch after processing: output.shape={output.shape} (original={original_output_shape}), targets.shape={targets.shape}")
 
                     # tính loss
                     loss = F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
@@ -960,11 +995,36 @@ class ClClipVariational(Evaluator):
 
             # chuẩn hoá shapes cho CE
                 targets = y.cuda(device=self.args.default_gpu)     # [B]
+                original_output_shape = output.shape
                 if output.dim() == 3:                              # phòng hờ nếu còn [1, B, C] hoặc [B, forward_times, C]
+                    # Kiểm tra shape để xác định dimension nào là batch
                     if output.shape[0] == 1:
                         output = output.mean(0)  # [1, B, C] -> [B, C]
+                    elif output.shape[1] == targets.shape[0]:
+                        # [B, forward_times, C] -> mean(1) -> [B, C]
+                        output = output.mean(1)
+                    elif output.shape[0] == targets.shape[0]:
+                        # [forward_times, B, C] -> mean(0) -> [B, C]
+                        output = output.mean(0)
                     else:
-                        output = output.mean(1)  # [B, forward_times, C] -> [B, C]
+                        # Không khớp, thử mean theo dimension đầu tiên
+                        output = output.mean(0)
+                elif output.dim() == 2:
+                    # Đã có shape [B, C], nhưng cần đảm bảo batch size khớp
+                    if output.shape[0] != targets.shape[0]:
+                        # Nếu không khớp, có thể cần reshape hoặc xử lý khác
+                        if output.shape[0] == 1:
+                            # [1, C] -> expand to [B, C]
+                            output = output.expand(targets.shape[0], -1)
+                        elif output.shape[1] == targets.shape[0]:
+                            # [C, B] -> transpose to [B, C]
+                            output = output.t()
+                        else:
+                            raise ValueError(f"Cannot match output shape {output.shape} to target batch size {targets.shape[0]}")
+                
+                # Đảm bảo output và targets có cùng batch size
+                if output.shape[0] != targets.shape[0]:
+                    raise ValueError(f"Batch size mismatch after processing: output.shape={output.shape} (original={original_output_shape}), targets.shape={targets.shape}")
                 # if self.args.variational:
                 #     targets = y.unsqueeze(0).expand(output.shape[0], -1).contiguous().view(-1)
                 #     output = output.view(-1, output.shape[-1])
