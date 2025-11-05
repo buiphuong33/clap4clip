@@ -409,6 +409,13 @@ class CLIP(nn.Module):
 
                     if self.args.hierarchical:
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
+                    
+                    # Kiểm tra text_features_ trước khi đưa vào get_variational_adapter_features
+                    if torch.isnan(text_features_).any():
+                        raise ValueError(f"text_features_ contains NaN before get_variational_adapter_features (test mode): text_features_.shape={text_features_.shape}, task={i}")
+                    if torch.isinf(text_features_).any():
+                        raise ValueError(f"text_features_ contains Inf before get_variational_adapter_features (test mode): text_features_.shape={text_features_.shape}, task={i}")
+                    
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                     n_samples_task = int(alloc[i].item()) if (self.use_anchor_routing and alloc is not None) else self.forward_times
                     n_samples_task = max(1, n_samples_task)  # Đảm bảo ít nhất 1 sample
@@ -588,6 +595,13 @@ class CLIP(nn.Module):
                 else:
                     n_samples_task = self.forward_times
                 n_samples_task = max(1, n_samples_task)  # Đảm bảo ít nhất 1 sample
+                
+                # Kiểm tra text_features_ trước khi đưa vào get_variational_adapter_features
+                if torch.isnan(text_features_).any():
+                    raise ValueError(f"text_features_ contains NaN before get_variational_adapter_features: text_features_.shape={text_features_.shape}, task={i}")
+                if torch.isinf(text_features_).any():
+                    raise ValueError(f"text_features_ contains Inf before get_variational_adapter_features: text_features_.shape={text_features_.shape}, task={i}")
+                
                 qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)            
                 rsamples = qdist.rsample([n_samples_task])
                 text_features_ = (
