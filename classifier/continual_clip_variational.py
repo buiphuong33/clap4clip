@@ -424,7 +424,12 @@ class CLIP(nn.Module):
                         text_features_ = text_features_.flatten(0, 1)
                     text_features_ = rsamples + text_features_ 
                     
-                    logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1) 
+                    # text_features_ shape: [n_samples_task, n_classes_task, feature_dim]
+                    # image_features_normed shape: [B, feature_dim]
+                    # Cần tính: [B, feature_dim] @ [n_samples_task, feature_dim, n_classes_task] -> [B, n_samples_task, n_classes_task]
+                    # Giải pháp: Dùng einsum để đảm bảo batch size ở dimension đầu tiên
+                    text_features_permuted = text_features_.permute(0, 2, 1)  # [n_samples_task, feature_dim, n_classes_task]
+                    logits_ = logit_scale * torch.einsum('bd,sfc->bsc', image_features_normed, text_features_permuted)  # [B, n_samples_task, n_classes_task]
                     # logits_ shape: [B, n_samples_task, n_classes_task]
                     # Đảm bảo logits_ có đúng shape: batch size phải khớp với image_features_normed
                     if logits_.shape[0] != image_features_normed.shape[0]:
@@ -602,7 +607,25 @@ class CLIP(nn.Module):
                     sims = torch.stack([prior_text_features @ rsamples[r].t() for r in range(rsamples.shape[0])], 0)
                     sims = sims.mean(2).mean(0)
                     kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * self.args.beta)
-                logits_ = (logit_scale * image_features_normed @ text_features_.permute(0, 2, 1)) 
+                # text_features_ shape: [n_samples_task, n_classes_task, feature_dim]
+                # image_features_normed shape: [B, feature_dim]
+                # Cần tính: [B, feature_dim] @ [n_samples_task, feature_dim, n_classes_task] -> [B, n_samples_task, n_classes_task]
+                # Giải pháp: Dùng einsum hoặc reshape để đảm bảo batch size ở dimension đầu tiên
+                # text_features_permuted: [n_samples_task, feature_dim, n_classes_task]
+                text_features_permuted = text_features_.permute(0, 2, 1)  # [n_samples_task, feature_dim, n_classes_task]
+                # Reshape để batch đi đầu: [B, n_samples_task, feature_dim, n_classes_task]
+                # Tính: [B, feature_dim] @ [B, n_samples_task, feature_dim, n_classes_task]
+                # Giải pháp đơn giản: Dùng einsum
+                # einsum('bd,sfc->bsfc', image_features_normed, text_features_permuted) -> [B, n_samples_task, feature_dim, n_classes_task]
+                # Sau đó sum theo feature_dim: [B, n_samples_task, n_classes_task]
+                # Hoặc đơn giản hơn: loop qua n_samples_task và tính cho mỗi sample
+                # Giải pháp tốt nhất: reshape và dùng bmm (batch matrix multiplication)
+                # Reshape text_features_permuted: [1, n_samples_task, feature_dim, n_classes_task]
+                # Expand image_features_normed: [B, 1, feature_dim]
+                # Tính: bmm([B, 1, feature_dim], [1, n_samples_task, feature_dim, n_classes_task])
+                # Không, cần dùng einsum hoặc tính trực tiếp
+                # Giải pháp: unsqueeze và dùng einsum
+                logits_ = logit_scale * torch.einsum('bd,sfc->bsc', image_features_normed, text_features_permuted)  # [B, n_samples_task, n_classes_task]
                 # logits_ shape: [B, n_samples_task, n_classes_task]
                 # Đảm bảo logits_ có đúng shape: batch size phải khớp với image_features_normed
                 if logits_.shape[0] != image_features_normed.shape[0]:
