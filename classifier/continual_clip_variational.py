@@ -445,8 +445,16 @@ class CLIP(nn.Module):
                 # Nếu có anchor routing, các logits_ đã được mean(1) → shape [B, total_classes]
                 # Nếu không có anchor routing, logits có shape [B, forward_times, total_classes] → cần mean theo samples
                 if not self.use_anchor_routing or alloc is None:
-                    logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
+                    if logits.dim() == 3:
+                        logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
+                    elif logits.dim() == 2:
+                        # Đã có shape [B, total_classes], không cần mean
+                        pass
+                    else:
+                        raise ValueError(f"Unexpected logits shape after cat: {logits.shape}")
                 # Đảm bảo logits có shape [B, total_classes] sau khi xử lý
+                if logits.dim() != 2:
+                    raise ValueError(f"Logits should have shape [B, total_classes] but got {logits.shape}")
                 logits = logits.detach()
             if self.args.compute_ram:
                 visual_feats = image_features_normed
@@ -628,8 +636,19 @@ class CLIP(nn.Module):
             # Nếu không có anchor routing, logits có shape [B, forward_times, total_classes] → cần mean theo samples
             if not self.use_anchor_routing or alloc is None:
                 # logits shape: [B, forward_times, total_classes]
-                logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
+                if logits.dim() == 3:
+                    logits = logits.mean(1)  # Mean theo samples dimension: [B, forward_times, total_classes] -> [B, total_classes]
+                elif logits.dim() == 2:
+                    # Đã có shape [B, total_classes], không cần mean
+                    pass
+                else:
+                    raise ValueError(f"Unexpected logits shape after cat: {logits.shape}")
             # Đảm bảo logits có shape [B, total_classes] sau khi xử lý
+            if logits.dim() != 2:
+                raise ValueError(f"Logits should have shape [B, total_classes] but got {logits.shape}. Use anchor routing: {self.use_anchor_routing}, alloc: {alloc is not None}")
+            # Debug: Kiểm tra batch size của logits
+            if labels is not None and logits.shape[0] != labels.shape[0]:
+                raise ValueError(f"Batch size mismatch in forward(): logits.shape={logits.shape}, labels.shape={labels.shape}, use_anchor_routing={self.use_anchor_routing}, alloc={alloc is not None if alloc is not None else None}")
             kl_loss = sum(kl_losses)  if len(kl_losses) else 0.
             prior_matching_loss = sum(prior_matching_losses) 
             # prior_matching_loss = prior_matching_loss * 0.01 #if not finetuning else prior_matching_loss * 0.1 
