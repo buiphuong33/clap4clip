@@ -259,13 +259,13 @@ class CLIP(nn.Module):
                 if self.args.use_vga:
                     vga_features = self.vga(query, context.unsqueeze(0), tgt_mask=attn_mask).squeeze(0)
                 
-                # Compute cosine similarity with anchors to determine sampling weights
-                task_similarities = []
-                task_sample_counts = []
+                # Compute cosine similarity with anchors to determine task weights
+                task_weights = None
                 if len(self.task_anchors) > 0:
                     # Calculate similarity for each image in batch with all anchors
                     # image_features_normed shape: [batch_size, embed_dim]
                     # For each task anchor, compute cosine similarity
+                    task_similarities = []
                     for task_id in range(self.args.sess + 1):
                         if task_id in self.task_anchors:
                             anchor = self.task_anchors[task_id]  # [embed_dim]
@@ -282,26 +282,11 @@ class CLIP(nn.Module):
                     similarities_stack = torch.stack(task_similarities, dim=0)  # [num_tasks, batch_size]
                     # Apply temperature scaling for sharper distribution
                     temperature = 2.0
-                    weights = F.softmax(similarities_stack / temperature, dim=0)  # [num_tasks, batch_size]
-                    
-                    # Calculate number of samples per task based on weights
-                    # Ensure minimum 1 sample per task, and scale based on similarity
-                    min_samples = 1
-                    max_samples = self.forward_times * 2  # Allow up to 2x the base forward_times
-                    # For each task, compute sample count as weighted average across batch
-                    avg_weights = weights.mean(dim=1)  # [num_tasks] - average weight across batch
-                    # Scale to get sample counts
-                    total_samples = self.forward_times * (self.args.sess + 1)
-                    task_sample_counts = []
-                    for i in range(self.args.sess + 1):
-                        # Calculate samples: min_samples + (max_samples - min_samples) * weight
-                        sample_count = int(min_samples + (max_samples - min_samples) * avg_weights[i].item())
-                        # Ensure at least min_samples and reasonable maximum
-                        sample_count = max(min_samples, min(sample_count, max_samples))
-                        task_sample_counts.append(sample_count)
+                    task_weights = F.softmax(similarities_stack / temperature, dim=0)  # [num_tasks, batch_size]
                 else:
-                    # If no anchors available, use uniform sampling
-                    task_sample_counts = [self.forward_times] * (self.args.sess + 1)
+                    # If no anchors available, use uniform weights
+                    task_weights = torch.ones((self.args.sess + 1, image_features_normed.shape[0]), 
+                                             device=image_features_normed.device) / (self.args.sess + 1)
                 
                 rsamples_g = None 
                 if self.args.hierarchical:
@@ -328,23 +313,35 @@ class CLIP(nn.Module):
                         text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
                     qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)
                     
-                    # Use task-specific sample count based on anchor similarity
-                    num_samples = task_sample_counts[i]
-                    rsamples = qdist.rsample([num_samples])
+                    # Sample from distribution (use fixed forward_times for all tasks)
+                    rsamples = qdist.rsample([self.forward_times])
                    
-                    text_features_ = text_features_.unsqueeze(0).expand(num_samples, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(num_samples, -1, -1)
+                    text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                     if self.args.hierarchical:
                         rsamples = rsamples.flatten(0, 1)
                         text_features_ = text_features_.flatten(0, 1)
                     text_features_ = rsamples + text_features_ 
                     
                     logits_ = logit_scale * image_features_normed @ text_features_.permute(0, 2, 1) 
+                    # logits_ shape: [num_samples, batch_size, num_classes_in_task]
+                    
+                    # Apply weighted mean: task with higher similarity gets higher weight
+                    # First compute mean over samples: [batch_size, num_classes_in_task]
+                    logits_ = logits_.mean(dim=0)  # [batch_size, num_classes_in_task]
+                    
+                    # Then scale by task weight: task with higher similarity contributes more
+                    # task_weights[i] shape: [batch_size]
+                    task_weight = task_weights[i]  # [batch_size]
+                    # Expand to [batch_size, 1] for broadcasting with logits_
+                    task_weight_expanded = task_weight.unsqueeze(-1)  # [batch_size, 1]
+                    # Scale logits by task weight: higher similarity = higher contribution
+                    logits_ = logits_ * task_weight_expanded  # [batch_size, num_classes_in_task]
                   
                     logits.append(logits_)
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
                 # logits = torch.stack(logits, 0).sum(0)
-                logits = torch.cat(logits, -1)
+                logits = torch.cat(logits, -1)  # [batch_size, total_num_classes]
                 logits = logits.detach()
             if self.args.compute_ram:
                 visual_feats = image_features_normed
@@ -352,10 +349,10 @@ class CLIP(nn.Module):
                 samplewise_text_feats = samplewise_text_feats / samplewise_text_feats.norm(dim=-1, keepdim=True)
                 samplewise_text_feats = samplewise_text_feats[labels]
                 return logits, (visual_feats.detach().cpu(), samplewise_text_feats.detach().cpu())
-            if return_mean:
-                return logits.mean(0), (None, None)
-            else:
-                return logits, (None,None)
+            # logits already has shape [batch_size, num_classes] after mean over samples per task
+            # If return_mean=True, we still return logits as is (already averaged)
+            # If return_mean=False, we also return logits as is (evaluator will handle if needed)
+            return logits, (None, None)
 
         else:
             
