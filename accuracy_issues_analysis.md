@@ -84,3 +84,5 @@ loss = F.cross_entropy(output, targets) + 0.1 * kl_loss + 0.1 * prior_matching_l
 3. **KIỂM TRA LEARNING RATE** thực tế trong quá trình training
 4. **LOG CÁC LOSS COMPONENTS** để xem loss nào dominate
 5. **KIỂM TRA SHAPE CỦA LOGITS** trong quá trình training
+
+

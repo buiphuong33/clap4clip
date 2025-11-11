@@ -281,7 +281,7 @@ class CLIP(nn.Module):
                     # task_similarities: list of [batch_size] tensors
                     similarities_stack = torch.stack(task_similarities, dim=0)  # [num_tasks, batch_size]
                     # Apply temperature scaling for sharper distribution
-                    temperature = 2.0
+                    temperature = getattr(self.args, "anchor_temp", 2.0)
                     task_weights = F.softmax(similarities_stack / temperature, dim=0)  # [num_tasks, batch_size]
                 else:
                     # If no anchors available, use uniform weights
@@ -333,7 +333,7 @@ class CLIP(nn.Module):
                     # task_weights[i] shape: [batch_size]
                     task_weight = task_weights[i]  # [batch_size]
                     # Expand to [batch_size, 1] for broadcasting with logits_
-                    task_weight_expanded = task_weight.unsqueeze(-1)  # [batch_size, 1]
+                    task_weight_expanded = task_weight.unsqueeze(-1).to(logits_.dtype)  # [batch_size, 1]
                     # Scale logits by task weight: higher similarity = higher contribution
                     logits_ = logits_ * task_weight_expanded  # [batch_size, num_classes_in_task]
                   
@@ -352,7 +352,8 @@ class CLIP(nn.Module):
             # logits already has shape [batch_size, num_classes] after mean over samples per task
             # If return_mean=True, we still return logits as is (already averaged)
             # If return_mean=False, we also return logits as is (evaluator will handle if needed)
-            return logits, (None, None)
+            #return logits, (None, None)
+            return (logits.unsqueeze(0) if not return_mean else logits), (None, None)
 
         else:
             
