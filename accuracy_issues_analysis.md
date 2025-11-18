@@ -86,3 +86,4 @@ loss = F.cross_entropy(output, targets) + 0.1 * kl_loss + 0.1 * prior_matching_l
 5. **KIỂM TRA SHAPE CỦA LOGITS** trong quá trình training
 
 
+

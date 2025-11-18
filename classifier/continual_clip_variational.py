@@ -333,9 +333,9 @@ class CLIP(nn.Module):
                     # task_weights[i] shape: [batch_size]
                     task_weight = task_weights[i]  # [batch_size]
                     # Expand to [batch_size, 1] for broadcasting with logits_
-                    task_weight_expanded = task_weight.unsqueeze(-1).to(logits_.dtype)  # [batch_size, 1]
+                    #task_weight_expanded = task_weight.unsqueeze(-1).to(logits_.dtype)  # [batch_size, 1]
                     # Scale logits by task weight: higher similarity = higher contribution
-                    logits_ = logits_ * task_weight_expanded  # [batch_size, num_classes_in_task]
+                    #logits_ = logits_ * task_weight_expanded  # [batch_size, num_classes_in_task]
                   
                     logits.append(logits_)
                     if self.args.compute_ram:
@@ -353,7 +353,11 @@ class CLIP(nn.Module):
             # If return_mean=True, we still return logits as is (already averaged)
             # If return_mean=False, we also return logits as is (evaluator will handle if needed)
             #return logits, (None, None)
-            return (logits.unsqueeze(0) if not return_mean else logits), (None, None)
+            #return (logits.unsqueeze(0) if not return_mean else logits), (None, None)
+            if return_mean:
+                return logits.mean(0), (None, None)
+            else:
+                return logits, (None,None)
 
         else:
             
