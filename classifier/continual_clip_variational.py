@@ -327,11 +327,11 @@ class CLIP(nn.Module):
                     
                     # Apply weighted mean: task with higher similarity gets higher weight
                     # First compute mean over samples: [batch_size, num_classes_in_task]
-                    logits_ = logits_.mean(dim=0)  # [batch_size, num_classes_in_task]
+                    #logits_ = logits_.mean(dim=0)  # [batch_size, num_classes_in_task]
                     
                     # Then scale by task weight: task with higher similarity contributes more
                     # task_weights[i] shape: [batch_size]
-                    task_weight = task_weights[i]  # [batch_size]
+                    #task_weight = task_weights[i]  # [batch_size]
                     # Expand to [batch_size, 1] for broadcasting with logits_
                     #task_weight_expanded = task_weight.unsqueeze(-1).to(logits_.dtype)  # [batch_size, 1]
                     # Scale logits by task weight: higher similarity = higher contribution
@@ -341,23 +341,68 @@ class CLIP(nn.Module):
                     if self.args.compute_ram:
                         samplewise_text_feats.append(text_features_relevant)
                 # logits = torch.stack(logits, 0).sum(0)
-                logits = torch.cat(logits, -1)  # [batch_size, total_num_classes]
+            #     logits = torch.cat(logits, -1)  # [batch_size, total_num_classes]
+            #     logits = logits.detach()
+            # if self.args.compute_ram:
+            #     visual_feats = image_features_normed
+            #     samplewise_text_feats = torch.cat(samplewise_text_feats, 0)
+            #     samplewise_text_feats = samplewise_text_feats / samplewise_text_feats.norm(dim=-1, keepdim=True)
+            #     samplewise_text_feats = samplewise_text_feats[labels]
+            #     return logits, (visual_feats.detach().cpu(), samplewise_text_feats.detach().cpu())
+            # # logits already has shape [batch_size, num_classes] after mean over samples per task
+            # # If return_mean=True, we still return logits as is (already averaged)
+            # # If return_mean=False, we also return logits as is (evaluator will handle if needed)
+            # #return logits, (None, None)
+            # #return (logits.unsqueeze(0) if not return_mean else logits), (None, None)
+            # if return_mean:
+            #     return logits.mean(0), (None, None)
+            # else:
+            #     return logits, (None,None)
+
+                # Sau vòng for: logits là list các tensor [S, B, C_task]
+                # Ghép theo chiều class -> [S, B, C_total]
+                logits = torch.cat(logits, -1)  # [num_samples, batch_size, total_num_classes]
+
+                # Áp dụng anchor như log-prior trên từng task
+                if task_weights is not None:
+                    # task_weights: [num_tasks, batch_size]
+                    log_task_weights = torch.log(task_weights + 1e-8)  # tránh log(0)
+
+                    start_cls_idx, end_cls_idx = 0, 0
+                    for t in range(self.args.sess + 1):
+                        start_cls_idx = end_cls_idx
+                        end_cls_idx += self.task_to_cls_num[t]
+
+                        # log p(task=t | x): [batch_size]
+                        log_prior_t = log_task_weights[t]              # [B]
+                        # Mở rộng để cộng vào logits: [1, B, 1] -> broadcast theo [S, B, C_task_t]
+                        log_prior_t = log_prior_t.unsqueeze(0).unsqueeze(-1)  # [1, B, 1]
+
+                        logits[:, :, start_cls_idx:end_cls_idx] += log_prior_t
+
                 logits = logits.detach()
+
             if self.args.compute_ram:
                 visual_feats = image_features_normed
                 samplewise_text_feats = torch.cat(samplewise_text_feats, 0)
                 samplewise_text_feats = samplewise_text_feats / samplewise_text_feats.norm(dim=-1, keepdim=True)
                 samplewise_text_feats = samplewise_text_feats[labels]
-                return logits, (visual_feats.detach().cpu(), samplewise_text_feats.detach().cpu())
-            # logits already has shape [batch_size, num_classes] after mean over samples per task
-            # If return_mean=True, we still return logits as is (already averaged)
-            # If return_mean=False, we also return logits as is (evaluator will handle if needed)
-            #return logits, (None, None)
-            #return (logits.unsqueeze(0) if not return_mean else logits), (None, None)
+
+                # Chọn trả logits theo return_mean
+                if return_mean:
+                    logits_out = logits.mean(0)    # [B, C_total]
+                else:
+                    logits_out = logits            # [S, B, C_total]
+
+                return logits_out, (visual_feats.detach().cpu(), samplewise_text_feats.detach().cpu())
+
+            # Trường hợp bình thường (không compute_ram)
             if return_mean:
-                return logits.mean(0), (None, None)
+                # Mean theo chiều sample (dim=0) như mô hình gốc
+                return logits.mean(0), (None, None)     # [B, C_total]
             else:
-                return logits, (None,None)
+                return logits, (None, None)             # [S, B, C_total]
+
 
         else:
             
