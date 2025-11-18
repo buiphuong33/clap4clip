@@ -236,7 +236,42 @@ class CLIP(nn.Module):
                 pairwise_distances.append(1-cos.item())
         avg_distance = np.mean(pairwise_distances)
         return avg_distance
-        
+
+    def get_task_weights_from_anchors(self, image_features_normed):
+        """
+        image_features_normed: [batch_size, embed_dim] (đã chuẩn hóa)
+        Trả về: task_weights [num_tasks, batch_size] với softmax theo task.
+        """
+        num_tasks = self.args.sess + 1
+
+        if len(self.task_anchors) > 0:
+            task_similarities = []
+            for task_id in range(num_tasks):
+                if task_id in self.task_anchors:
+                    anchor = self.task_anchors[task_id]  # [embed_dim], đã được normalize
+                    # cosine similarity vì cả hai đều norm=1
+                    similarity = image_features_normed @ anchor  # [batch_size]
+                    task_similarities.append(similarity)
+                else:
+                    # nếu chưa có anchor cho task này (ví dụ task hiện tại), cho similarity trung tính
+                    task_similarities.append(
+                        torch.zeros(image_features_normed.shape[0],
+                                    device=image_features_normed.device)
+                    )
+
+            similarities_stack = torch.stack(task_similarities, dim=0)  # [num_tasks, batch_size]
+            temperature = getattr(self.args, "anchor_temp", 2.0)
+            task_weights = F.softmax(similarities_stack / temperature, dim=0)  # [num_tasks, batch_size]
+        else:
+            # Không có anchor nào → uniform
+            task_weights = torch.ones(
+                (num_tasks, image_features_normed.shape[0]),
+                device=image_features_normed.device
+            ) / num_tasks
+
+        return task_weights
+
+     
     def forward(self, image, labels=None, test=False, finetuning=False, return_mean=True, for_prior=None):
         with torch.no_grad():
             image_features = self.image_encoder(image.type(self.dtype))
@@ -260,34 +295,37 @@ class CLIP(nn.Module):
                     vga_features = self.vga(query, context.unsqueeze(0), tgt_mask=attn_mask).squeeze(0)
                 
                 # Compute cosine similarity with anchors to determine task weights
-                task_weights = None
-                if len(self.task_anchors) > 0:
-                    # Calculate similarity for each image in batch with all anchors
-                    # image_features_normed shape: [batch_size, embed_dim]
-                    # For each task anchor, compute cosine similarity
-                    task_similarities = []
-                    for task_id in range(self.args.sess + 1):
-                        if task_id in self.task_anchors:
-                            anchor = self.task_anchors[task_id]  # [embed_dim]
-                            # Compute cosine similarity: both are normalized, so dot product = cosine similarity
-                            # image_features_normed @ anchor -> [batch_size]
-                            similarity = (image_features_normed @ anchor)  # [batch_size]
-                            task_similarities.append(similarity)
-                        else:
-                            # If anchor not available, use uniform similarity
-                            task_similarities.append(torch.ones(image_features_normed.shape[0], device=image_features_normed.device) * 0.5)
+                # task_weights = None
+                # if len(self.task_anchors) > 0:
+                #     # Calculate similarity for each image in batch with all anchors
+                #     # image_features_normed shape: [batch_size, embed_dim]
+                #     # For each task anchor, compute cosine similarity
+                #     task_similarities = []
+                #     for task_id in range(self.args.sess + 1):
+                #         if task_id in self.task_anchors:
+                #             anchor = self.task_anchors[task_id]  # [embed_dim]
+                #             # Compute cosine similarity: both are normalized, so dot product = cosine similarity
+                #             # image_features_normed @ anchor -> [batch_size]
+                #             similarity = (image_features_normed @ anchor)  # [batch_size]
+                #             task_similarities.append(similarity)
+                #         else:
+                #             # If anchor not available, use uniform similarity
+                #             task_similarities.append(torch.ones(image_features_normed.shape[0], device=image_features_normed.device) * 0.5)
                     
-                    # Convert similarities to weights using softmax (per image in batch)
-                    # task_similarities: list of [batch_size] tensors
-                    similarities_stack = torch.stack(task_similarities, dim=0)  # [num_tasks, batch_size]
-                    # Apply temperature scaling for sharper distribution
-                    temperature = getattr(self.args, "anchor_temp", 2.0)
-                    task_weights = F.softmax(similarities_stack / temperature, dim=0)  # [num_tasks, batch_size]
-                else:
-                    # If no anchors available, use uniform weights
-                    task_weights = torch.ones((self.args.sess + 1, image_features_normed.shape[0]), 
-                                             device=image_features_normed.device) / (self.args.sess + 1)
+                #     # Convert similarities to weights using softmax (per image in batch)
+                #     # task_similarities: list of [batch_size] tensors
+                #     similarities_stack = torch.stack(task_similarities, dim=0)  # [num_tasks, batch_size]
+                #     # Apply temperature scaling for sharper distribution
+                #     temperature = getattr(self.args, "anchor_temp", 2.0)
+                #     task_weights = F.softmax(similarities_stack / temperature, dim=0)  # [num_tasks, batch_size]
+                # else:
+                #     # If no anchors available, use uniform weights
+                #     task_weights = torch.ones((self.args.sess + 1, image_features_normed.shape[0]), 
+                #                              device=image_features_normed.device) / (self.args.sess + 1)
                 
+                # Compute task weights từ anchor (hoặc uniform nếu chưa có anchor)
+                task_weights = self.get_task_weights_from_anchors(image_features_normed)
+
                 rsamples_g = None 
                 if self.args.hierarchical:
                     # vga_features_global = self.vga(query, context.unsqueeze(0)).squeeze(0)
@@ -520,7 +558,28 @@ class CLIP(nn.Module):
                 kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * 5)
                 
             logits = torch.cat(logits, -1)
-           
+            #NEW
+            if len(self.task_anchors) > 0:
+                task_weights = self.get_task_weights_from_anchors(image_features_normed)
+                # task_weights: [num_tasks, B]
+                log_task_weights = torch.log(task_weights + 1e-8)
+                
+                start_cls_idx, end_cls_idx = 0, 0
+                
+                for t in range(self.args.sess + 1):
+                    start_cls_idx = end_cls_idx
+                    end_cls_idx += self.task_to_cls_num[t]
+
+                    log_prior_t = log_task_weights[t]  # [B]
+                    if logits.dim() == 3:
+                        # [S, B, C_total] → broadcast [1, B, 1]
+                        log_prior_t_exp = log_prior_t.unsqueeze(0).unsqueeze(-1)  # [1, B, 1]
+                        logits[:, :, start_cls_idx:end_cls_idx] += log_prior_t_exp
+                    else:
+                        # Trường hợp không variational: logits [B, C_total]
+                        log_prior_t_exp = log_prior_t.unsqueeze(-1)  # [B, 1]
+                        logits[:, start_cls_idx:end_cls_idx] += log_prior_t_exp
+            # === END NEW PART ===
             kl_loss = sum(kl_losses)  if len(kl_losses) else 0.
             prior_matching_loss = sum(prior_matching_losses) 
             # prior_matching_loss = prior_matching_loss * 0.01 #if not finetuning else prior_matching_loss * 0.1 
